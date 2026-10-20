@@ -1,11 +1,15 @@
 pub mod app;
+pub mod cli;
 pub mod config;
 pub mod demo;
 pub mod fx;
 pub mod hook;
 pub mod keys;
 pub mod markdown;
+pub mod mcp;
 pub mod queue;
+pub mod setup;
 pub mod store;
 pub mod theme;
+pub mod tui;
 pub mod ui;
