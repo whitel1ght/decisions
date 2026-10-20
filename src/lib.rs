@@ -1,6 +1,8 @@
 pub mod app;
+pub mod config;
 pub mod demo;
 pub mod fx;
+pub mod hook;
 pub mod keys;
 pub mod markdown;
 pub mod queue;
