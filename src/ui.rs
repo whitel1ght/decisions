@@ -44,7 +44,7 @@ const KEYS: &[(&str, &str)] = &[
     ("last row", "something else: tell the agent in your words"),
     ("a", "ask the session back"),
     ("s", "skip to the end of the stack"),
-    ("o", "open the MR"),
+    ("o", "open the link (MR, PR, ticket)"),
     ("r", "reload"),
     ("q / esc", "send pending answers and close"),
 ];

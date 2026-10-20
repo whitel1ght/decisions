@@ -1,20 +1,166 @@
 # decisions
 
-The /run-day decision queue as a deck of cards (tmux prefix y). Reads and answers only
-through `bin/decide`; never touches the decision files itself.
+Your coding agents stop to ask you things: approve this, pick one of these, which file did you
+mean. With several sessions running, those questions hide in different terminals.
+`decisions` collects them into one queue and shows it as a deck of cards in your terminal; you
+answer in a couple of keys, and each answer goes back to the session that asked.
 
-- Build and install: `./install.sh` (rebuilds when `src/`, `Cargo.toml` or `Cargo.lock` change),
-  or `cargo build` and run `target/debug/decisions`.
-- Tests: `cargo test` (state, drawing, effects, decide calls) and `tests/e2e.sh` (the real
-  binary in a pseudo-terminal against the real `decide`, sandboxed).
-- Modules: `queue` runs `decide`; `app` is all behaviour as a pure `update(state, event, now)`;
-  `ui` draws; `fx` runs the tachyonfx effects; `keys` maps terminal keys; `main` wires the
-  terminal, watcher, signals and threads.
-- Try the screen and keys on made-up data: `decisions --demo` (or `cargo run -- --demo`); it
-  never runs `decide`. To try it against the real `decide` on a sandbox queue instead:
+It works with any agent harness that speaks MCP (Claude Code, Codex, Gemini CLI, opencode,
+pi, Cursor, …), and the queue is plain Markdown files you own.
 
-  ```bash
-  S=$(mktemp -d); export RUN_DAY_STATE_DIR=$S INBOX_DIR=$S/inbox DECIDE=$PWD/../bin/decide
-  echo "Some **context**" | $DECIDE add --key ACME-1 --question "Ship it?" --option Yes --option No --recommend 1
-  cargo run
-  ```
+```
+╭ decisions · demo · 8 waiting · oldest 4h 10m ────────────────────────────────────────────────╮
+│ ╭ D-1 · demo · acme-1004 · reply ↩ reply ──────────────────────────────────────── ⏱ 4h 10m ╮ │
+│ │                                                                                          │ │
+│ │ Reply to the client's question about the export columns?                                 │ │
+│ │                                                                                          │ │
+│ │ ★ 1  Send the drafted reply                                                              │ │
+│ │   2  Change it first (add a note with n)                                                 │ │
+│ │   3  I'll answer myself                                                                  │ │
+│ │ ✎ 4  Something else… tell the agent                                                      │ │
+│ │                                                                                          │ │
+│ │ space: context · 5 lines · discussion · 0                                                │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────╯ │
+│  ╰───────────────────────────────────────────────────────────────────────── D-2 · 2h 05m ─╯  │
+│   ╰────────────────────────────────────────────────────────────────────────── D-3 · 45m ─╯   │
+│    ╰──────────────────────────────────────────────────────────────────────── D-4 · 20m ─╯    │
+│     ╰──────────────────────────────────────────────────────────── D-5 · 14m · +3 more ─╯     │
+╰ J/K cards · j/k options · 1-9 answer · ⏎ pick · space flip · ? help ─────────────────────────╯
+```
+
+## Install
+
+Rust 1.89 or newer:
+
+```bash
+cargo install --git https://github.com/whitel1ght/decisions --tag v0.1.0
+decisions --demo        # a made-up queue: try the keys, nothing is read or written
+decisions               # the real queue
+```
+
+macOS and Linux.
+
+## Connect your agent
+
+```bash
+decisions setup claude      # or: codex, gemini, opencode, pi, cursor, generic
+```
+
+prints how to register `decisions mcp` in that harness and how long it can wait for you. For
+Claude Code it is one line:
+
+```bash
+claude mcp add --scope user decisions -e DECISIONS_WAIT=0 -- decisions mcp
+```
+
+The server tells the agent to send its questions to you through `ask_user` instead of the chat
+(clients that show MCP server instructions pick this up on their own; `setup` also prints an
+optional paragraph for `AGENTS.md` / `CLAUDE.md` for those that do not). Questions from every
+session land in the same deck, and each card says who asked: `D-7 · claude-code · my-repo`.
+
+| Harness | Waits for a tool call | Raise it with | Honours progress pings |
+|---|---|---|---|
+| Claude Code | about 28 h; backgrounds the call after 2 min | `MCP_TOOL_TIMEOUT`, per-server `timeout` | resets its idle timer |
+| Codex CLI | 60 s | `tool_timeout_sec` | no |
+| Gemini CLI | 10 min | per-server `timeout` (ms) | no |
+| opencode | 12 h | `timeout.execution` | unverified |
+| Cursor | about 60 s, fixed | — | IDE yes, CLI no |
+| pi | 60 s | per-server `timeout` (s) | yes |
+
+## How waiting works
+
+`ask_user` files the question and waits up to `DECISIONS_WAIT` seconds (default 50, under the
+common 60 s client limit; `0` = no limit), pinging the client every 15 s when it accepts
+progress notifications. What you answer in time comes straight back. Otherwise the agent gets
+`pending: D-7 is still open — call wait_for_answer("D-7")`, keeps working, and asks again when it
+needs the answer. The question lives on disk, not in the request: a client timeout, restart or
+reconnect never loses it.
+
+What the agent can get back:
+
+| Result | Meaning |
+|---|---|
+| `answered: 2 — Push only` (+ `note: …`) | you picked an option |
+| `answered in your own words: …` | you answered outside the options |
+| `the user asked back: … — answer with reply("D-7", text) …` | you asked a question back |
+| `pending: D-7 is still open …` | not answered yet |
+| `withdrawn: D-7 (…)` | the question was withdrawn |
+
+## Answering
+
+| Key | |
+|---|---|
+| `J / K` | next / previous card |
+| `j / k` | move between the options (back: scroll) |
+| `g / G` | first / last option (back: top / bottom) |
+| `1-9` | answer with that option |
+| `⏎` | option under the cursor, else ★ |
+| `space` | flip the card: context and discussion |
+| `^d / ^u` | page the back |
+| `u` | undo the last answer (5 s) |
+| `n` | note on the card, or on the last answer |
+| `last row` | something else: tell the agent in your own words |
+| `a` | ask the agent a question back |
+| `s` | skip to the end of the stack |
+| `o` | open the link (MR, PR, ticket) |
+| `r` | reload |
+| `?` | all the keys |
+| `q / esc` | send pending answers and close |
+
+Each card's border turns blue → yellow → orange → red as it waits.
+
+## Configuration
+
+`~/.config/decisions/config.toml` (or `$XDG_CONFIG_HOME/decisions/config.toml`), all optional:
+
+```toml
+mode = "always"          # "always": agents send every question here; "on-request": only when you ask them to
+wait = 50                # seconds an MCP call waits before returning pending; 0 = no limit
+on_answer = ""           # command run on every answer, own-words answer and ask-back
+mr_strip_prefix = ""     # removed from repository names in short MR labels
+```
+
+| Environment | Overrides |
+|---|---|
+| `DECISIONS_DIR` | where the queue lives (default `~/.local/state/decisions`) |
+| `DECISIONS_WAIT`, `DECISIONS_MODE`, `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP` | the config keys |
+| `DECISIONS_SESSION` | a label added to the cards' "who asked" |
+
+`on_answer` runs with `/bin/sh -c` and gets one JSON line on stdin (10 s limit; a failure warns
+and never undoes the answer):
+
+```json
+{"event":"answered","id":"D-7","key":"ABC-1","source":"claude-code · repo","option":2,"note":null,"text":"D-7 answered: 2 — Push only.","at":"2026-10-20T11:20:00+03:00"}
+```
+
+`event` is `answered`, `told` (own words) or `asked` (you asked back). For example, a desktop
+notification: `on_answer = "jq -r .text | xargs -0 notify-send decisions"`.
+
+## The CLI
+
+For scripts and agents without MCP:
+
+| Command | |
+|---|---|
+| `decisions add --question Q --option A --option B [--recommend N] [--key K] [--mr URL] [--blocks T] [--source S]` | file a question (context on stdin); prints `D-<n>` |
+| `decisions list [--json]` | open decisions |
+| `decisions show ID` | the decision file |
+| `decisions count [--badge]` | how many are open (`--badge`: `✋ N`) |
+| `decisions answer ID N [NOTE]` / `tell ID TEXT` / `ask ID TEXT` | answer, answer in your own words, ask back |
+| `decisions reply ID TEXT` / `withdraw ID [REASON]` / `close ID` | the asker's side |
+| `decisions wait ID [--timeout S]` | block until something happens (exit 0 answered, 3 pending, 4 withdrawn, 5 asked back) |
+| `decisions setup HARNESS` | how to connect a harness |
+
+The queue is one Markdown file per decision in `DECISIONS_DIR`; closed ones move to
+`done/<day>/`. Writes take a lock and rename a temp file into place, so the deck, the CLI and
+any number of MCP servers can share it.
+
+## Development
+
+`cargo test`, `tests/cli.sh` (the CLI on a sandbox store) and `tests/e2e.sh` (the real binary in
+a pseudo-terminal, including an MCP question answered in the deck). Design notes:
+[docs/spec.md](docs/spec.md).
+
+## Licence
+
+MIT
