@@ -1,0 +1,42 @@
+[
+  {
+    "id": "D-1",
+    "key": "ACME-1001",
+    "mr": "https://gitlab.com/acme/acme-backend/-/merge_requests/870",
+    "mr_short": "backend!870",
+    "question": "Push the fix and post the reply?",
+    "asked": "2026-10-20T11:04:08+03:00",
+    "age": "0m",
+    "blocks": "reply",
+    "question_back": false,
+    "options": [
+      { "n": 1, "text": "Push and post", "recommended": true },
+      { "n": 2, "text": "Push only", "recommended": false },
+      { "n": 3, "text": "Leave it", "recommended": false }
+    ],
+    "recommended": 1,
+    "context": "### Why\n\nThe reviewer asked for **two** paths.\n\n- `fallbackMeter` misses the DMS save\n- the retry path\n\n```\ncode line\n```",
+    "discussion": []
+  },
+  {
+    "id": "D-2",
+    "key": "ACME-1002",
+    "mr": "",
+    "mr_short": "",
+    "question": "Merge dashboard!940 now?",
+    "asked": "2026-10-20T11:04:08+03:00",
+    "age": "0m",
+    "blocks": "",
+    "question_back": false,
+    "options": [
+      { "n": 1, "text": "Merge", "recommended": false },
+      { "n": 2, "text": "Wait for QA", "recommended": false }
+    ],
+    "recommended": null,
+    "context": "Short context.",
+    "discussion": [
+      { "at": "11:04", "who": "you", "text": "Which QA run?" },
+      { "at": "11:04", "who": "session", "text": "The staging one from today." }
+    ]
+  }
+]

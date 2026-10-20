@@ -25,7 +25,7 @@ notifications, Windows, crates.io and Homebrew releases.
 
 ## One binary
 
-`decisions` (Rust, MIT, macOS and Linux, Rust 1.85+):
+`decisions` (Rust, MIT, macOS and Linux, Rust 1.89+):
 
 | Command | What it does |
 |---|---|
@@ -60,10 +60,10 @@ id: D-7
 day: 2026-10-20
 key: ACME-1001
 mr: https://gitlab.com/group/repo/-/merge_requests/870
-source: claude-code · repo-name · session-label
 asked: 2026-10-20T11:04:08+03:00
 blocks: reply
 status: open            # open | answered | withdrawn
+source: claude-code · repo-name · session-label
 ---
 ## Question
 Push the fix and post the reply?
@@ -82,7 +82,8 @@ at: 2026-10-20T11:20:00+03:00
 ```
 
 - An own-words answer is `## Answer` `your words — <text>`.
-- `key`, `mr`, `blocks`, `source` may be empty. Options: 2 to 9, at most one `(recommended)`.
+- `key`, `mr`, `blocks`, `source` may be empty. `source` is written last and only when
+  non-empty, so a file without it stays byte-identical to the older Python format. Options: 2 to 9, at most one `(recommended)`.
 - Numbers never repeat: the next id is one more than the highest in the folder and `done/`.
 - Every write takes an exclusive lock on `$DECISIONS_DIR/.lock`, writes a dot-prefixed temp
   file and renames it into place, so readers never see half a file and concurrent writers never
@@ -100,10 +101,11 @@ at: 2026-10-20T11:20:00+03:00
 mode = "always"        # "always" | "on-request": what the MCP server tells agents
 wait = 50              # seconds an MCP call waits before returning pending; 0 = no limit
 on_answer = ""         # command run on every answer, own-words answer and ask-back
+mr_strip_prefix = ""   # removed from repository names in short MR labels, e.g. "acme-"
 ```
 
 Environment overrides: `DECISIONS_DIR`, `DECISIONS_WAIT`, `DECISIONS_MODE`,
-`DECISIONS_SESSION` (a label added to `source`).
+`DECISIONS_SESSION` (a label added to `source`), `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP`.
 
 ## The `on_answer` hook
 
@@ -143,6 +145,9 @@ the agent's system prompt), by `mode`:
 | `wait_for_answer` | `id`; optional `timeout_seconds` | an outcome |
 | `reply` | `id`, `text` | ok; answers a question the user asked back |
 | `withdraw` | `id`; optional `reason` | ok |
+
+A `ticket` that is not a `KEY-123` key goes into the context as `Ticket: …`. Asking the same
+open question again (same ticket and question) returns the existing id instead of a second card.
 
 `ask_user` adds an "own words" slot automatically: the user can always answer outside the
 options, so the agent never adds an "Other" option itself.

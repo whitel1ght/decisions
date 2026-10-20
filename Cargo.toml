@@ -1,0 +1,26 @@
+[package]
+name = "decisions"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "A queue of the questions your coding agents are waiting on, answered as a deck of cards"
+repository = "https://github.com/whitel1ght/decisions"
+readme = "README.md"
+keywords = ["mcp", "tui", "agents", "claude", "human-in-the-loop"]
+categories = ["command-line-utilities"]
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+notify-debouncer-mini = "0.7"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.4"
+toml = "1"
+tachyonfx = "0.25"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+unicode-width = "0.2"
