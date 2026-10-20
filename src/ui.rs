@@ -287,7 +287,12 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
             Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD),
         ),
     ];
-    for part in [d.key.to_lowercase(), d.mr_short.clone(), d.blocks.clone()] {
+    for part in [
+        d.source.clone(),
+        d.key.to_lowercase(),
+        d.mr_short.clone(),
+        d.blocks.clone(),
+    ] {
         if !part.is_empty() {
             title.push(Span::styled(
                 format!(" · {part}"),
@@ -846,5 +851,15 @@ mod tests {
         }
         app::update(&mut s, Event::Key(Key::Enter), T0);
         assert!(screen(&render(&s, 80, 24).0).contains("✓ D-1 → ✎ close it"));
+    }
+    #[test]
+    fn the_card_names_who_asked() {
+        let mut list = fixture();
+        list[0].source = "claude-code · repo".into();
+        let all = screen(&render(&state(list, T0), 100, 24).0);
+        assert!(
+            all.contains("D-1 · claude-code · repo · acme-1001 · backend!870 · reply"),
+            "{all}"
+        );
     }
 }

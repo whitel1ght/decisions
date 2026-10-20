@@ -5,6 +5,7 @@ pub mod demo;
 pub mod fx;
 pub mod hook;
 pub mod keys;
+pub mod live;
 pub mod markdown;
 pub mod mcp;
 pub mod queue;

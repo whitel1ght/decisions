@@ -11,7 +11,7 @@ use crate::app::{self, Command, Event, State};
 use crate::demo::Demo;
 use crate::fx::Fx;
 use crate::keys;
-use crate::queue::{Backend, Decide};
+use crate::queue::Backend;
 use crate::ui::{self, Areas};
 use crossterm::event::{self, Event as TermEvent};
 use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
@@ -81,7 +81,7 @@ impl Runner {
         &mut self,
         id: String,
         ask: bool,
-        call: impl FnOnce(&dyn Backend, &str) -> Result<(), String> + Send + 'static,
+        call: impl FnOnce(&dyn Backend, &str) -> Result<Option<String>, String> + Send + 'static,
     ) {
         self.in_flight += 1;
         let (decide, tx) = (self.decide.clone(), self.tx.clone());
@@ -134,7 +134,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
     let (backend, reload_every): (Arc<dyn Backend>, Duration) = if demo {
         (Arc::new(Demo::new()), DEMO_RELOAD_EVERY)
     } else {
-        (Arc::new(Decide::from_env()), RELOAD_EVERY)
+        (Arc::new(crate::live::Live::new(cfg)), RELOAD_EVERY)
     };
 
     let (tx, rx) = mpsc::channel::<Event>();

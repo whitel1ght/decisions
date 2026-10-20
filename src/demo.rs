@@ -6,9 +6,6 @@
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-
 use crate::queue::{Backend, Decision, Entry, Opt};
 
 /// The card whose answer always fails (failed-send badge, retry, quit warning).
@@ -33,9 +30,8 @@ struct DemoState {
 }
 
 fn iso(ms: i64) -> String {
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
-        .ok()
-        .and_then(|t| t.format(&Rfc3339).ok())
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .unwrap_or_default()
 }
 
@@ -334,11 +330,11 @@ impl Backend for Demo {
         Ok(s.open.clone())
     }
 
-    fn tell(&self, id: &str, _text: &str) -> Result<(), String> {
+    fn tell(&self, id: &str, _text: &str) -> Result<Option<String>, String> {
         self.answer(id, 0, None)
     }
 
-    fn answer(&self, id: &str, _n: u8, _note: Option<&str>) -> Result<(), String> {
+    fn answer(&self, id: &str, _n: u8, _note: Option<&str>) -> Result<Option<String>, String> {
         if id == FAILS_ANSWER {
             return Err("demo: answering this card always fails".into());
         }
@@ -351,11 +347,11 @@ impl Backend for Demo {
         if s.open.len() == before {
             Err(format!("demo: {id} is not open"))
         } else {
-            Ok(())
+            Ok(None)
         }
     }
 
-    fn ask(&self, id: &str, text: &str) -> Result<(), String> {
+    fn ask(&self, id: &str, text: &str) -> Result<Option<String>, String> {
         if id == FAILS_ASK {
             return Err("demo: asking back on this card always fails".into());
         }
@@ -371,7 +367,7 @@ impl Backend for Demo {
             .ok_or_else(|| format!("demo: {id} is not open"))?;
         d.discussion.push(entry("you", text));
         s.replies.push((due, id.to_string()));
-        Ok(())
+        Ok(None)
     }
 }
 

@@ -22,5 +22,4 @@ serde_json = "1"
 signal-hook = "0.4"
 toml = "1"
 tachyonfx = "0.25"
-time = { version = "0.3", features = ["formatting", "parsing"] }
 unicode-width = "0.2"

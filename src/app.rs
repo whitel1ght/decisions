@@ -36,7 +36,7 @@ pub enum Event {
     Sent {
         id: String,
         ask: bool,
-        result: Result<(), String>,
+        result: Result<Option<String>, String>,
     },
     Signal,
 }
@@ -649,13 +649,19 @@ fn input_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
     }
 }
 
-fn sent(s: &mut State, id: String, ask: bool, result: Result<(), String>, out: &mut Vec<Command>) {
+fn sent(
+    s: &mut State,
+    id: String,
+    ask: bool,
+    result: Result<Option<String>, String>,
+    out: &mut Vec<Command>,
+) {
     if ask {
         let text = s.asking.remove(&id).unwrap_or_default();
         match result {
-            Ok(()) => {
+            Ok(warning) => {
                 s.ask_failed.remove(&id);
-                s.toast(format!("asked {id}"));
+                s.toast(warning.unwrap_or_else(|| format!("asked {id}")));
             }
             Err(error) => {
                 s.ask_failed.insert(id.clone(), AskFailed { text, error });
@@ -665,8 +671,11 @@ fn sent(s: &mut State, id: String, ask: bool, result: Result<(), String>, out: &
         }
     } else if let Some(p) = s.sending.remove(&id) {
         match result {
-            Ok(()) => {
+            Ok(warning) => {
                 s.failed.remove(&id);
+                if let Some(w) = warning {
+                    s.toast(w);
+                }
             }
             Err(error) => {
                 s.failed.insert(
@@ -1137,7 +1146,7 @@ mod tests {
         Event::Sent {
             id: id.into(),
             ask,
-            result: result.map_err(String::from),
+            result: result.map(|_| None).map_err(String::from),
         }
     }
 
@@ -1321,7 +1330,7 @@ mod tests {
             Event::Sent {
                 id: "D-1".into(),
                 ask: false,
-                result: Ok(()),
+                result: Ok(None),
             },
             T0 + UNDO_MS,
         );
@@ -1484,5 +1493,25 @@ mod tests {
         press(&mut s, Key::Char('2'));
         press(&mut s, Key::Char('n'));
         assert_eq!(s.input.as_ref().unwrap().kind, InputKind::Note);
+    }
+    #[test]
+    fn a_hook_warning_is_toasted() {
+        let mut s = loaded(fixture());
+        press(&mut s, Key::Char('1'));
+        update(&mut s, Event::Tick, T0 + UNDO_MS);
+        update(
+            &mut s,
+            Event::Sent {
+                id: "D-1".into(),
+                ask: false,
+                result: Ok(Some("on_answer failed (exit 9): broken".into())),
+            },
+            T0 + UNDO_MS,
+        );
+        assert_eq!(
+            s.toast.as_ref().unwrap().0,
+            "on_answer failed (exit 9): broken"
+        );
+        assert!(s.failed.is_empty(), "the answer stands");
     }
 }
