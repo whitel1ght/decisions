@@ -33,7 +33,8 @@ struct Server<W: Write> {
     out: Mutex<W>,
     client: Mutex<String>,
     cancelled: Mutex<HashSet<String>>,
-    reported: Mutex<HashMap<String, String>>,
+    /// Per id, how many discussion entries there were when an ask-back was last reported.
+    reported: Mutex<HashMap<String, usize>>,
     closed: AtomicBool,
 }
 
@@ -88,6 +89,8 @@ fn outcome_result(id: &str, o: &Outcome) -> Value {
         Outcome::AskedBack(q) => json!({"status": "asked_back", "id": id, "question": q}),
         Outcome::Withdrawn(reason) => json!({"status": "withdrawn", "id": id, "reason": reason}),
     };
+    let mut structured = structured;
+    structured["message"] = json!(o.describe(id));
     text_result(o.describe(id), structured)
 }
 
@@ -215,21 +218,20 @@ impl<W: Write> Server<W> {
             (String::new(), format!("Ticket: {ticket}\n\n"))
         };
         context.push_str(a["context"].as_str().unwrap_or(""));
-        if let Some(id) = self.store.find_open(&key, &question) {
+        let new = New {
+            key,
+            mr: a["link"].as_str().unwrap_or("").into(),
+            blocks: a["blocks"].as_str().unwrap_or("").into(),
+            source: self.source(),
+            question,
+            options,
+            recommend: a["recommended"].as_u64().map(|n| n as usize),
+            context,
+        };
+        if let Some(id) = self.store.find_asked(&new) {
             return Ok(id);
         }
-        self.store
-            .add(New {
-                key,
-                mr: a["link"].as_str().unwrap_or("").into(),
-                blocks: a["blocks"].as_str().unwrap_or("").into(),
-                source: self.source(),
-                question,
-                options,
-                recommend: a["recommended"].as_u64().map(|n| n as usize),
-                context,
-            })
-            .map_err(|e| e.0)
+        self.store.add(new).map_err(|e| e.0)
     }
 
     fn wait_for(
@@ -251,11 +253,13 @@ impl<W: Write> Server<W> {
             let outcome = self.store.outcome(qid).map_err(|e| e.0)?;
             let fresh = match &outcome {
                 Outcome::Pending => false,
-                Outcome::AskedBack(q) => self
-                    .reported
-                    .lock()
-                    .map(|mut r| r.insert(qid.to_string(), q.clone()).as_ref() != Some(q))
-                    .unwrap_or(true),
+                Outcome::AskedBack(_) => {
+                    let seen = self.store.discussion_count(qid).unwrap_or(0);
+                    self.reported
+                        .lock()
+                        .map(|mut r| r.insert(qid.to_string(), seen) != Some(seen))
+                        .unwrap_or(true)
+                }
                 _ => true,
             };
             if fresh {
@@ -661,5 +665,91 @@ mod tests {
         let (mut cl, _) = Client::start(&cfg(1, Mode::Always));
         assert_eq!(cl.call("ping", json!({}))["result"], json!({}));
         assert_eq!(cl.call("nope/nope", json!({}))["error"]["code"], -32601);
+    }
+
+    fn start_as(c: &Config, name: &str) -> Client {
+        let (mut cl, _) = Client::start(c);
+        cl.call(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "clientInfo": {"name": name}}),
+        );
+        cl
+    }
+
+    #[test]
+    fn two_askers_with_the_same_question_get_separate_cards() {
+        let c = cfg(1, Mode::Always);
+        let mut a = start_as(&c, "claude-code");
+        let mut b = start_as(&c, "codex");
+        let ra = a.tool(
+            "ask_user",
+            json!({"question": "Push to main?", "options": ["yes", "no"], "context": "hotfix"}),
+        );
+        let rb = b.tool("ask_user", json!({"question": "Push to main?", "options": ["yes, force", "no", "rebase first"], "context": "40 commits"}));
+        assert_ne!(ra["structuredContent"]["id"], rb["structuredContent"]["id"]);
+        let mut b2 = start_as(&c, "gemini-cli");
+        let rb2 = b2.tool(
+            "ask_user",
+            json!({"question": "Push to main?", "options": ["yes", "no"], "context": "hotfix"}),
+        );
+        assert_ne!(
+            ra["structuredContent"]["id"], rb2["structuredContent"]["id"],
+            "same options, other asker"
+        );
+        assert_eq!(c.store().count(), 3);
+    }
+
+    #[test]
+    fn different_non_key_tickets_are_different_questions() {
+        let c = cfg(1, Mode::Always);
+        let (mut cl, _) = Client::start(&c);
+        let r1 = cl.tool(
+            "ask_user",
+            json!({"question": "Merge now?", "options": ["a", "b"], "ticket": "#41"}),
+        );
+        let r2 = cl.tool(
+            "ask_user",
+            json!({"question": "Merge now?", "options": ["a", "b"], "ticket": "#42"}),
+        );
+        assert_ne!(r1["structuredContent"]["id"], r2["structuredContent"]["id"]);
+    }
+
+    #[test]
+    fn a_retry_after_the_answer_gets_that_answer() {
+        let c = cfg(1, Mode::Always);
+        let (mut cl, _) = Client::start(&c);
+        ask(&mut cl);
+        c.store().answer("D-1", 2, "").unwrap();
+        let r = ask(&mut cl);
+        assert_eq!(text(&r), "answered: 2 — No");
+        assert_eq!(c.store().count(), 0, "no second card");
+    }
+
+    #[test]
+    fn an_ask_back_repeated_with_the_same_words_is_reported_again() {
+        let c = cfg(1, Mode::Always);
+        let (mut cl, _) = Client::start(&c);
+        ask(&mut cl);
+        c.store().ask("D-1", "which run?").unwrap();
+        assert!(
+            text(&cl.tool("wait_for_answer", json!({"id": "D-1"})))
+                .starts_with("the user asked back")
+        );
+        cl.tool("reply", json!({"id": "D-1", "text": "staging"}));
+        c.store().ask("D-1", "which run?").unwrap();
+        let r = cl.tool("wait_for_answer", json!({"id": "D-1"}));
+        assert!(
+            text(&r).starts_with("the user asked back: which run?"),
+            "{}",
+            text(&r)
+        );
+    }
+
+    #[test]
+    fn structured_content_carries_the_guidance_text() {
+        let c = cfg(1, Mode::Always);
+        let (mut cl, _) = Client::start(&c);
+        let r = ask(&mut cl);
+        assert_eq!(r["structuredContent"]["message"], json!(text(&r)));
     }
 }

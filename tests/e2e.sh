@@ -79,6 +79,11 @@ assert_eq 0 "$rc" "--demo runs without decide and quits cleanly"
 assert_eq "" "$(inbox)" "--demo answers never reach the inbox"
 assert_eq 2 "$("$BIN" count)" "--demo leaves the real queue alone"
 
+export DECISIONS_DIR="$SANDBOX/nodir" DECISIONS_ON_ANSWER="cat >> '$SANDBOX/nodir.events'"
+( sleep 1; "$BIN" add --key ACME-9 --question "First ever?" --option Yes --option No </dev/null >/dev/null ) &
+drive sleep:3 1 sleep:6 q >/dev/null
+assert_contains "$(cat "$SANDBOX/nodir.events" 2>/dev/null)" "D-1 answered: 1 — Yes" "a deck opened before the store exists sees the first question at once"
+
 fresh mcp empty
 DECISIONS_WAIT=0 python3 "$HERE/mcp_client.py" "$BIN" ask_user '{"question":"Ship the MCP build?","options":["Ship it","Hold"],"recommended":1}' > "$SANDBOX/mcp.out" &
 client=$!

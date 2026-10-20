@@ -18,6 +18,7 @@ const FIELDS: [&str; 8] = [
 ];
 const SECTIONS: [&str; 5] = ["Question", "Context", "Options", "Discussion", "Answer"];
 const REC: &str = " (recommended)";
+const RECENT_HOURS: i64 = 12;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fail(pub String);
@@ -197,7 +198,17 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::write(&tmp, text).map_err(io)?;
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(io)?;
+        f.write_all(text.as_bytes()).map_err(io)?;
+    }
     fs::rename(&tmp, path).map_err(io)
 }
 
@@ -236,10 +247,7 @@ fn discussion(section: &str) -> Vec<Entry> {
 }
 
 fn question_back(section: &str) -> bool {
-    section
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .is_some_and(|l| l.contains(" you: "))
+    discussion(section).last().is_some_and(|e| e.who == "you")
 }
 
 fn age(asked: &str) -> String {
@@ -525,6 +533,74 @@ impl Store {
             .map(|d| d.get("id").to_string())
     }
 
+    /// The card this asker already filed for the same question: same source, question,
+    /// options, ticket and `Ticket:` line. Open ones always; answered or withdrawn ones not
+    /// yet closed when asked within `RECENT_HOURS`, so a retried ask_user gets the answer.
+    pub fn find_asked(&self, n: &New) -> Option<String> {
+        let want_opts: Vec<String> = n.options.iter().map(|o| one_line(o)).collect();
+        let (key, question, source) = (
+            n.key.trim().to_uppercase(),
+            one_line(&n.question),
+            one_line(&n.source),
+        );
+        let ticket = |c: &str| {
+            c.lines()
+                .next()
+                .filter(|l| l.starts_with("Ticket: "))
+                .unwrap_or("")
+                .to_string()
+        };
+        let since = now().fixed_offset() - chrono::Duration::hours(RECENT_HOURS);
+        let mut names: Vec<String> = fs::read_dir(&self.dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|n| n.starts_with("D-") && n.ends_with(".md"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names.into_iter().find_map(|name| {
+            let doc = parse(&fs::read_to_string(self.dir.join(&name)).ok()?).ok()?;
+            let recent = doc.get("status") == "open"
+                || DateTime::parse_from_rfc3339(doc.get("asked")).is_ok_and(|t| t >= since);
+            let opts: Vec<String> = options(doc.section("Options"))
+                .into_iter()
+                .map(|o| o.1)
+                .collect();
+            (recent
+                && doc.get("source") == source
+                && doc.get("key").to_uppercase() == key
+                && one_line(doc.section("Question")) == question
+                && opts == want_opts
+                && ticket(doc.section("Context")) == ticket(&n.context))
+            .then(|| doc.get("id").to_string())
+        })
+    }
+
+    /// How many discussion entries a decision has (open, answered or closed).
+    pub fn discussion_count(&self, id: &str) -> Result<usize> {
+        let doc = parse(&fs::read_to_string(self.find_file(id)?).map_err(io)?)?;
+        Ok(discussion(doc.section("Discussion")).len())
+    }
+
+    fn find_file(&self, id: &str) -> Result<PathBuf> {
+        if !is_id(id) {
+            return fail(format!("not a decision id: {id}"));
+        }
+        let name = format!("{id}.md");
+        let path = self.dir.join(&name);
+        if path.exists() {
+            return Ok(path);
+        }
+        let mut files = Vec::new();
+        walk(&self.dir.join("done"), &mut files);
+        files
+            .into_iter()
+            .find(|p| p.file_name().is_some_and(|n| n == name.as_str()))
+            .ok_or_else(|| Fail(format!("{id} not found in {}", self.dir.display())))
+    }
+
     pub fn add(&self, n: New) -> Result<String> {
         let _lock = self.lock()?;
         let opts: Vec<String> = n.options.iter().map(|o| one_line(o)).collect();
@@ -544,8 +620,13 @@ impl Store {
         if question.is_empty() {
             return fail("--question is empty");
         }
-        if let Some(id) = self.find_open(&key, &question) {
-            return fail(format!("{id} already asks this"));
+        let source = one_line(&n.source);
+        if let Some(id) = self.open_docs().0.into_iter().find(|d| {
+            d.get("key").to_uppercase() == key
+                && one_line(d.section("Question")) == question
+                && d.get("source") == source
+        }) {
+            return fail(format!("{} already asks this", id.get("id")));
         }
         let context: String = n
             .context
@@ -716,19 +797,7 @@ impl Store {
 
     /// What the asker should hear now. Reads without the lock: every write is atomic.
     pub fn outcome(&self, id: &str) -> Result<Outcome> {
-        if !is_id(id) {
-            return fail(format!("not a decision id: {id}"));
-        }
-        let name = format!("{id}.md");
-        let mut path = self.dir.join(&name);
-        if !path.exists() {
-            let mut files = Vec::new();
-            walk(&self.dir.join("done"), &mut files);
-            path = files
-                .into_iter()
-                .find(|p| p.file_name().is_some_and(|n| n == name.as_str()))
-                .ok_or_else(|| Fail(format!("{id} not found in {}", self.dir.display())))?;
-        }
+        let path = self.find_file(id)?;
         let doc = parse(&fs::read_to_string(&path).map_err(io)?)?;
         Ok(match doc.get("status") {
             "answered" => {
@@ -1136,5 +1205,80 @@ mod tests {
             ],
             [0, 3, 4, 5]
         );
+    }
+
+    #[test]
+    fn a_reply_mentioning_you_is_not_a_question_back() {
+        let s = store();
+        s.add(new("", "Merge?", &["yes", "no"])).unwrap();
+        s.ask("D-1", "which run?").unwrap();
+        s.reply("D-1", "as I told you: the staging run").unwrap();
+        assert!(!s.list().0[0].question_back);
+        assert_eq!(s.outcome("D-1").unwrap(), Outcome::Pending);
+    }
+
+    #[test]
+    fn decision_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = store();
+        first(&s);
+        let mode = fs::metadata(s.dir.join("D-1.md"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn the_same_question_from_another_asker_is_a_new_card() {
+        let s = store();
+        let mut a = new("", "Push to main?", &["yes", "no"]);
+        a.source = "claude-code · repoA".into();
+        let mut b = a.clone();
+        b.source = "codex · repoB".into();
+        assert_eq!(s.add(a.clone()).unwrap(), "D-1");
+        assert_eq!(s.add(b).unwrap(), "D-2");
+        assert!(
+            s.add(a).is_err(),
+            "the same asker repeating it is still refused"
+        );
+    }
+
+    #[test]
+    fn find_asked_matches_asker_question_options_and_context_head() {
+        let s = store();
+        let mut n = new("", "Push to main?", &["yes", "no"]);
+        n.source = "claude-code · repoA".into();
+        n.context = "Ticket: #41\n\nhotfix".into();
+        s.add(n.clone()).unwrap();
+        assert_eq!(s.find_asked(&n).as_deref(), Some("D-1"));
+        let mut other = n.clone();
+        other.source = "codex · repoB".into();
+        assert_eq!(s.find_asked(&other), None, "another asker");
+        let mut opts = n.clone();
+        opts.options = vec!["yes, force".into(), "no".into()];
+        assert_eq!(s.find_asked(&opts), None, "other options");
+        let mut ticket = n.clone();
+        ticket.context = "Ticket: #42\n\nhotfix".into();
+        assert_eq!(s.find_asked(&ticket), None, "another ticket");
+        s.answer("D-1", 1, "").unwrap();
+        assert_eq!(
+            s.find_asked(&n).as_deref(),
+            Some("D-1"),
+            "an answered, not yet closed one still matches"
+        );
+        s.close("D-1").unwrap();
+        assert_eq!(s.find_asked(&n), None, "a closed one does not");
+    }
+
+    #[test]
+    fn discussion_count() {
+        let s = store();
+        s.add(new("", "Merge?", &["yes", "no"])).unwrap();
+        assert_eq!(s.discussion_count("D-1").unwrap(), 0);
+        s.ask("D-1", "why?").unwrap();
+        s.reply("D-1", "because").unwrap();
+        assert_eq!(s.discussion_count("D-1").unwrap(), 2);
     }
 }

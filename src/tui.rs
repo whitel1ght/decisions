@@ -19,6 +19,12 @@ use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
 const RELOAD_EVERY: Duration = Duration::from_secs(30);
 const DEMO_RELOAD_EVERY: Duration = Duration::from_secs(2);
+/// Opens a link in the browser.
+pub const OPENER: &str = if cfg!(target_os = "macos") {
+    "open"
+} else {
+    "xdg-open"
+};
 const SEND_WAIT: Duration = Duration::from_secs(10);
 
 fn now_ms() -> i64 {
@@ -47,7 +53,7 @@ impl Runner {
             Command::Ask { id, text } => self.send(id, true, move |d, id| d.ask(id, &text)),
             Command::Tell { id, text } => self.send(id, false, move |d, id| d.tell(id, &text)),
             Command::OpenUrl(url) => {
-                let _ = std::process::Command::new("open")
+                let _ = std::process::Command::new(OPENER)
                     .arg(url)
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -152,6 +158,8 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
     let _watcher = if demo {
         None
     } else {
+        // Watch even before the first question: a missing folder could not be watched.
+        let _ = std::fs::create_dir_all(&cfg.dir);
         watch(cfg.dir.clone(), tx.clone())
     };
 
@@ -257,5 +265,18 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_opener_fits_the_platform() {
+        let want = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(super::OPENER, want);
     }
 }
