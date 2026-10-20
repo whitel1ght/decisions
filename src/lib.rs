@@ -4,5 +4,6 @@ pub mod fx;
 pub mod keys;
 pub mod markdown;
 pub mod queue;
+pub mod store;
 pub mod theme;
 pub mod ui;

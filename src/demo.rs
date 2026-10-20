@@ -63,6 +63,7 @@ fn card(
         key: key.into(),
         mr,
         mr_short,
+        source: "demo".into(),
         question: question.into(),
         asked: iso(asked),
         blocks: blocks.into(),

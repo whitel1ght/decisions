@@ -3,11 +3,11 @@
 
 use std::process::Command;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Opt {
     pub n: u8,
     pub text: String,
@@ -15,7 +15,7 @@ pub struct Opt {
     pub recommended: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Entry {
     #[serde(default)]
     pub at: String,
@@ -25,7 +25,7 @@ pub struct Entry {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Decision {
     pub id: String,
     #[serde(default)]
@@ -34,6 +34,8 @@ pub struct Decision {
     pub mr: String,
     #[serde(default)]
     pub mr_short: String,
+    #[serde(default)]
+    pub source: String,
     pub question: String,
     pub asked: String,
     #[serde(default)]
