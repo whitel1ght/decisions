@@ -9,9 +9,10 @@ use crate::hook;
 use crate::idle::{self, Idle};
 use crate::queue::Decision;
 use crate::store::{Event, Outcome, Store, one_line};
-use crate::telegram::api::{Api, ApiError, Update};
+use crate::telegram::api::{Api, ApiError, Kind, Update};
 use crate::telegram::render::{self, Keyboard, Msg};
-use crate::telegram::state::{self, Sent, State};
+use crate::telegram::reply::{self, Command, Press, Reply};
+use crate::telegram::state::{self, Pending, Sent, State};
 
 pub const UNDO_MS: i64 = 10_000;
 pub const POLL_SECS: u64 = 5;
@@ -351,19 +352,177 @@ impl<A: Api> Bot<A> {
         Ok(())
     }
 
-    /// Replaced in Task 8 by the real dispatcher.
-    pub fn handle(&mut self, _u: &Update) -> Result<(), ApiError> {
+    /// Only the paired private chat is heard; everything else is dropped without a word.
+    pub fn handle(&mut self, u: &Update) -> Result<(), ApiError> {
+        let Some(chat) = self.state()?.chat_id else {
+            return Ok(());
+        };
+        match &u.kind {
+            Kind::Message {
+                chat_id,
+                private: true,
+                message_id,
+                text,
+                reply_to,
+            } if *chat_id == chat => self.message(chat, *message_id, text, *reply_to),
+            Kind::Press {
+                query_id,
+                chat_id,
+                data,
+                ..
+            } if *chat_id == chat => self.press(chat, query_id, data),
+            _ => Ok(()),
+        }
+    }
+
+    fn message(
+        &mut self,
+        chat: i64,
+        mid: i64,
+        text: &str,
+        reply_to: Option<i64>,
+    ) -> Result<(), ApiError> {
+        if let Some(c) = reply::command(text) {
+            return self.command(chat, mid, c);
+        }
+        let st = self.state()?;
+        let id = match reply_to.and_then(|r| st.card_of(r)) {
+            Some(id) => id,
+            None => {
+                let open = st.open();
+                if reply_to.is_none() && open.len() == 1 {
+                    open[0].clone()
+                } else {
+                    self.say(chat, "Reply to the card you mean.", Some(mid))?;
+                    return Ok(());
+                }
+            }
+        };
+        if st.messages[&id].done {
+            self.say(chat, &format!("{id} is already answered."), Some(mid))?;
+            return Ok(());
+        }
+        let Some(d) = self.store.list().0.into_iter().find(|d| d.id == id) else {
+            self.say(chat, &format!("{id} is already answered."), Some(mid))?;
+            return self.close_card(chat, &id, true);
+        };
+        let options: Vec<u8> = d.options.iter().map(|o| o.n).collect();
+        match reply::parse(text, &options) {
+            Reply::Empty => {
+                self.say(chat, HELP, Some(mid))?;
+                Ok(())
+            }
+            Reply::Ask(q) => {
+                match self.store.ask(&id, &q) {
+                    Ok(event) => {
+                        self.run_hook(chat, &id, &event)?;
+                        self.say(chat, &format!("Asked: {q}"), Some(mid))?;
+                    }
+                    Err(e) => {
+                        self.say(chat, &e.0, Some(mid))?;
+                    }
+                }
+                Ok(())
+            }
+            Reply::Answer { n, note } => {
+                self.update(|s| {
+                    s.pending.remove(&id);
+                })?;
+                let r = self.store.answer(&id, n, &note);
+                self.finish(chat, &id, r)
+            }
+            Reply::Tell(t) => {
+                self.update(|s| {
+                    s.pending.remove(&id);
+                })?;
+                let r = self.store.tell(&id, &t);
+                self.finish(chat, &id, r)
+            }
+        }
+    }
+
+    fn press(&mut self, chat: i64, qid: &str, data: &str) -> Result<(), ApiError> {
+        let Some(p) = reply::press(data) else {
+            return self.api.answer_press(qid, "");
+        };
+        let id = match &p {
+            Press::Answer { id, .. } | Press::Undo { id } => id.clone(),
+        };
+        let Some(sent) = self.state()?.messages.get(&id).cloned() else {
+            return self.api.answer_press(qid, "");
+        };
+        let open = self.store.list().0.into_iter().find(|d| d.id == id);
+        let Some(d) = open.filter(|_| !sent.done) else {
+            self.api.answer_press(qid, "already answered")?;
+            return if sent.done {
+                Ok(())
+            } else {
+                self.close_card(chat, &id, true)
+            };
+        };
+        match p {
+            Press::Answer { n, .. } => {
+                let Some(o) = d.options.iter().find(|o| o.n == n) else {
+                    return self.api.answer_press(qid, "no such option");
+                };
+                let due_ms = (self.now)() + UNDO_MS;
+                self.update(|s| {
+                    s.pending.insert(
+                        id.clone(),
+                        Pending {
+                            option: n,
+                            note: String::new(),
+                            due_ms,
+                            message_id: sent.message_id,
+                        },
+                    );
+                })?;
+                self.api.answer_press(qid, "")?;
+                let m =
+                    render::with_status(&sent.text, sent.html, &render::pending_line(n, &o.text));
+                self.edit(chat, sent.message_id, &m, &render::undo(&id))
+            }
+            Press::Undo { .. } => {
+                self.update(|s| {
+                    s.pending.remove(&id);
+                })?;
+                self.api.answer_press(qid, "")?;
+                let m = Msg {
+                    text: sent.text.clone(),
+                    html: sent.html,
+                };
+                self.edit(chat, sent.message_id, &m, &render::buttons(&d))
+            }
+        }
+    }
+
+    fn command(&mut self, chat: i64, mid: i64, c: Command) -> Result<(), ApiError> {
+        let text = match c {
+            Command::On => {
+                self.update(|s| s.enabled = true)?;
+                "On: cards come here while you're away.".to_string()
+            }
+            Command::Off => {
+                self.update(|s| s.enabled = false)?;
+                "Off: no new cards. Cards already here still take answers.".to_string()
+            }
+            Command::Status => {
+                let st = self.state()?;
+                let secs = self.idle.seconds();
+                summary(&st, &self.store.list().0, secs, self.idle_minutes)
+            }
+            Command::Help => HELP.to_string(),
+        };
+        self.say(chat, &text, Some(mid))?;
         Ok(())
     }
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // helpers Task 8's tests use
 mod tests {
     use super::*;
     use crate::config::Mode;
     use crate::store::New;
-    use crate::telegram::api::Kind;
     use crate::telegram::fake::{Fake, FixedIdle, Out};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
@@ -657,5 +816,340 @@ mod tests {
         assert!(
             summary(&State::default(), &[], None, 5).starts_with("off · away (idle time unknown)")
         );
+    }
+
+    #[test]
+    fn a_tap_is_saved_after_the_undo_window_and_runs_the_hook() {
+        let mut t = setup(LOG);
+        let id = add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.push(tap(1, 100, &format!("a:{id}:1")));
+        t.bot.turn().unwrap();
+        let e = edit_of(&t, 100);
+        assert!(e.text.contains("⏳ 1 — Yes"), "{}", e.text);
+        assert_eq!(e.keyboard, render::undo(&id));
+        assert_eq!(t.bot.api.presses, vec![("q1".to_string(), String::new())]);
+        assert_eq!(t.bot.store.count(), 1, "not yet");
+        t.now.set(t.now.get() + UNDO_MS + 1);
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.store.count(), 0);
+        assert!(
+            events(&t).contains("D-1 answered: 1 — Yes"),
+            "{}",
+            events(&t)
+        );
+        let e = edit_of(&t, 100);
+        assert!(
+            e.text.contains("✓ 1 — Yes") && !e.text.contains("in the deck"),
+            "{}",
+            e.text
+        );
+        assert!(e.keyboard.is_empty());
+        let s = st(&t);
+        assert!(s.messages[&id].done && s.pending.is_empty());
+    }
+
+    #[test]
+    fn undo_inside_the_window_saves_nothing() {
+        let mut t = setup(LOG);
+        let id = add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.push(tap(1, 100, &format!("a:{id}:1")));
+        t.bot.turn().unwrap();
+        t.bot.api.updates.push(tap(2, 100, &format!("u:{id}")));
+        t.bot.turn().unwrap();
+        let e = edit_of(&t, 100);
+        assert_eq!(e.text, st(&t).messages[&id].text);
+        assert_eq!(e.keyboard, render::buttons(&t.bot.store.list().0[0]));
+        t.now.set(t.now.get() + UNDO_MS + 1);
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.store.count(), 1);
+        assert_eq!(events(&t), "");
+    }
+
+    #[test]
+    fn a_second_tap_replaces_the_first() {
+        let mut t = setup(LOG);
+        let id = add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.extend([
+            tap(1, 100, &format!("a:{id}:1")),
+            tap(2, 100, &format!("a:{id}:2")),
+        ]);
+        t.bot.turn().unwrap();
+        t.now.set(t.now.get() + UNDO_MS + 1);
+        t.bot.turn().unwrap();
+        assert_eq!(
+            t.bot.store.outcome(&id).unwrap(),
+            Outcome::Answered {
+                n: 2,
+                text: "No".into(),
+                note: None
+            }
+        );
+    }
+
+    #[test]
+    fn an_overdue_answer_is_saved_after_a_restart() {
+        let t = setup(LOG);
+        let id = add(&t, "First?");
+        let due = t.now.get() - 1;
+        state::update(&t.bot.dir, |s| {
+            s.messages.insert(
+                id.clone(),
+                Sent {
+                    message_id: 100,
+                    text: "Q".into(),
+                    ..Sent::default()
+                },
+            );
+            s.pending.insert(
+                id.clone(),
+                state::Pending {
+                    option: 2,
+                    note: String::new(),
+                    due_ms: due,
+                    message_id: 100,
+                },
+            );
+        })
+        .unwrap();
+        let mut fresh = bot(&t.cfg, &t.idle, &t.now, &t.logs);
+        fresh.turn().unwrap();
+        assert_eq!(fresh.store.count(), 0);
+        assert!(events(&t).contains("answered: 2 — No"));
+    }
+
+    #[test]
+    fn text_replies_answer_tell_and_ask() {
+        let mut t = setup(LOG);
+        let a = add(&t, "A?");
+        let b = add(&t, "B?");
+        let c = add(&t, "C?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.extend([
+            msg(1, "2 mention staging", Some(100)),
+            msg(2, "close it as a duplicate", Some(101)),
+            msg(3, "? which run", Some(102)),
+        ]);
+        t.bot.turn().unwrap();
+        assert_eq!(
+            t.bot.store.outcome(&a).unwrap(),
+            Outcome::Answered {
+                n: 2,
+                text: "No".into(),
+                note: Some("mention staging".into())
+            }
+        );
+        assert_eq!(
+            t.bot.store.outcome(&b).unwrap(),
+            Outcome::Told("close it as a duplicate".into())
+        );
+        assert_eq!(
+            t.bot.store.outcome(&c).unwrap(),
+            Outcome::AskedBack("which run".into())
+        );
+        assert!(events(&t).contains("\"event\":\"asked\""));
+        assert!(
+            t.bot
+                .api
+                .sent
+                .iter()
+                .any(|o| o.text == "Asked: which run" && o.reply_to == Some(1003))
+        );
+        let s = st(&t);
+        assert!(s.messages[&a].done && s.messages[&b].done && !s.messages[&c].done);
+    }
+
+    #[test]
+    fn a_reply_to_the_sessions_message_goes_to_its_card() {
+        let mut t = setup(LOG);
+        let id = add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.store.ask(&id, "which run?").unwrap();
+        t.bot.store.reply(&id, "staging").unwrap();
+        t.bot.turn().unwrap();
+        t.bot.api.updates.push(msg(1, "1", Some(101)));
+        t.bot.turn().unwrap();
+        assert_eq!(
+            t.bot.store.outcome(&id).unwrap(),
+            Outcome::Answered {
+                n: 1,
+                text: "Yes".into(),
+                note: None
+            }
+        );
+    }
+
+    #[test]
+    fn text_that_replies_to_nothing() {
+        let mut t = setup(LOG);
+        let a = add(&t, "A?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.push(msg(1, "close it", None));
+        t.bot.turn().unwrap();
+        assert_eq!(
+            t.bot.store.outcome(&a).unwrap(),
+            Outcome::Told("close it".into())
+        );
+        add(&t, "B?");
+        add(&t, "C?");
+        t.bot.turn().unwrap();
+        t.bot
+            .api
+            .updates
+            .extend([msg(2, "hm", None), msg(3, "x", Some(100))]);
+        t.bot.turn().unwrap();
+        let says: Vec<(String, Option<i64>)> = t
+            .bot
+            .api
+            .sent
+            .iter()
+            .map(|o| (o.text.clone(), o.reply_to))
+            .collect();
+        assert!(
+            says.contains(&("Reply to the card you mean.".into(), Some(1002))),
+            "{says:?}"
+        );
+        assert!(
+            says.contains(&(format!("{a} is already answered."), Some(1003))),
+            "{says:?}"
+        );
+    }
+
+    #[test]
+    fn other_chats_and_groups_are_ignored() {
+        let mut t = setup(LOG);
+        let id = add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.extend([
+            Update {
+                id: 1,
+                kind: Kind::Message {
+                    chat_id: 8,
+                    private: true,
+                    message_id: 1,
+                    text: "1".into(),
+                    reply_to: Some(100),
+                },
+            },
+            Update {
+                id: 2,
+                kind: Kind::Message {
+                    chat_id: CHAT,
+                    private: false,
+                    message_id: 2,
+                    text: "1".into(),
+                    reply_to: Some(100),
+                },
+            },
+            Update {
+                id: 3,
+                kind: Kind::Press {
+                    query_id: "q".into(),
+                    chat_id: 8,
+                    message_id: 100,
+                    data: format!("a:{id}:1"),
+                },
+            },
+            Update {
+                id: 4,
+                kind: Kind::Other,
+            },
+        ]);
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.store.count(), 1);
+        assert_eq!(t.bot.api.sent.len(), 1, "only the card");
+        assert!(t.bot.api.presses.is_empty() && t.bot.api.edits.is_empty());
+        assert_eq!(st(&t).offset, 5);
+    }
+
+    #[test]
+    fn chat_commands() {
+        let mut t = setup(LOG);
+        add(&t, "First?");
+        t.idle.set(Some(0));
+        t.bot.api.updates.push(msg(1, "/off", None));
+        t.bot.turn().unwrap();
+        assert!(!st(&t).enabled);
+        assert!(t.bot.api.sent.last().unwrap().text.starts_with("Off"));
+        t.bot.api.updates.push(msg(2, "/on@fake_bot", None));
+        t.bot.turn().unwrap();
+        assert!(st(&t).enabled);
+        t.bot.api.updates.push(msg(3, "/status", None));
+        t.bot.turn().unwrap();
+        let s = &t.bot.api.sent.last().unwrap().text;
+        assert!(
+            s.starts_with("on · at the computer") && s.contains("D-1 · First? · not sent yet"),
+            "{s}"
+        );
+        t.bot.api.updates.push(msg(4, "/what", None));
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.api.sent.last().unwrap().text, HELP);
+    }
+
+    #[test]
+    fn a_tap_that_loses_to_the_deck_shows_the_decks_answer() {
+        let mut t = setup(LOG);
+        let id = add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.push(tap(1, 100, &format!("a:{id}:1")));
+        t.bot.turn().unwrap();
+        t.bot.store.answer(&id, 2, "").unwrap();
+        t.now.set(t.now.get() + UNDO_MS + 1);
+        t.bot.turn().unwrap();
+        assert!(edit_of(&t, 100).text.contains("✓ 2 — No (in the deck)"));
+        assert_eq!(events(&t), "", "the bot's own answer was refused");
+        assert!(st(&t).pending.is_empty());
+    }
+
+    #[test]
+    fn a_failing_hook_keeps_the_answer_and_says_so() {
+        let mut t = setup("echo broken >&2; exit 3");
+        add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.push(msg(1, "1", Some(100)));
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.store.count(), 0);
+        let w = t
+            .bot
+            .api
+            .sent
+            .iter()
+            .find(|o| o.text.starts_with("⚠ hook failed"))
+            .expect("a warning");
+        assert!(
+            w.text.contains("broken") && w.reply_to == Some(100),
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn updates_are_not_handled_twice() {
+        let mut t = setup(LOG);
+        add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.push(msg(1, "close it", Some(100)));
+        t.bot.turn().unwrap();
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.api.offsets.last(), Some(&2));
+        assert!(
+            !t.bot
+                .api
+                .sent
+                .iter()
+                .any(|o| o.text.contains("already answered"))
+        );
+    }
+
+    #[test]
+    fn odd_button_data_is_just_acknowledged() {
+        let mut t = setup(LOG);
+        add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.updates.push(tap(1, 100, "zzz"));
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.api.presses, vec![("q1".to_string(), String::new())]);
+        assert!(t.bot.api.edits.is_empty());
     }
 }
