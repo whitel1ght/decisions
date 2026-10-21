@@ -140,6 +140,19 @@ pub fn unit(macos: bool, exe: &str, home: &str, env: &[(String, String)]) -> Str
     }
 }
 
+/// What would keep the installed service from starting: the unit never carries the token
+/// itself, and `run` refuses an unpaired chat.
+pub fn setup_warnings(t: &Telegram, paired: bool) -> Vec<String> {
+    let mut w = Vec::new();
+    if t.token_cmd.is_none() {
+        w.push("the service does not get DECISIONS_TELEGRAM_TOKEN: set token_cmd under [telegram] in config.toml (or DECISIONS_TELEGRAM_TOKEN_CMD) before installing it".into());
+    }
+    if !paired {
+        w.push("not paired yet: run `decisions telegram pair` before starting the service".into());
+    }
+    w
+}
+
 fn now_ms() -> i64 {
     chrono::Local::now().timestamp_millis()
 }
@@ -273,6 +286,10 @@ pub fn run(cmd: TgCmd, cfg: &Config) -> ExitCode {
             let exe = std::env::current_exe()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "decisions".into());
+            let paired = state::load(&cfg.dir).is_ok_and(|s| s.chat_id.is_some());
+            for w in setup_warnings(&cfg.telegram, paired) {
+                eprintln!("decisions: warning: {w}");
+            }
             let home = std::env::var("HOME").unwrap_or_default();
             print!(
                 "{}",
@@ -384,5 +401,21 @@ mod tests {
             assert!(crate::cli::Cli::try_parse_from(args).is_ok(), "{args:?}");
         }
         assert!(crate::cli::Cli::try_parse_from(["decisions", "telegram", "nope"]).is_err());
+    }
+
+    #[test]
+    fn setup_warns_when_the_service_would_not_start() {
+        let t = Telegram {
+            token: Some("x".into()),
+            ..Telegram::default()
+        };
+        let w = setup_warnings(&t, false);
+        assert!(w.iter().any(|l| l.contains("token_cmd")), "{w:?}");
+        assert!(w.iter().any(|l| l.contains("pair")), "{w:?}");
+        let t = Telegram {
+            token_cmd: Some("secret X".into()),
+            ..Telegram::default()
+        };
+        assert!(setup_warnings(&t, true).is_empty());
     }
 }

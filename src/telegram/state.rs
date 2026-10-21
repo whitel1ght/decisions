@@ -20,6 +20,12 @@ pub struct Sent {
     pub html: bool,
     #[serde(default)]
     pub replies: Vec<i64>,
+    /// The card's `asked` and question when it was sent: an id reused for a new card (after
+    /// a file was deleted) does not match, so the new card is sent.
+    #[serde(default)]
+    pub asked: String,
+    #[serde(default)]
+    pub question: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

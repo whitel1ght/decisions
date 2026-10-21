@@ -266,6 +266,7 @@ pub fn outcome_line(o: &Outcome, elsewhere: bool) -> Option<String> {
 
 /// The sent text with a status line under it; plain and cut when that would not fit.
 pub fn with_status(text: &str, html: bool, status: &str) -> Msg {
+    let status = &cut(status, LIMIT / 2);
     let line = if html {
         format!("<b>{}</b>", escape(status))
     } else {

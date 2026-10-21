@@ -27,6 +27,10 @@ pub struct Fake {
     pub fail: VecDeque<ApiError>,
     /// Refuse HTML, as Telegram does for text it cannot parse.
     pub refuse_html: bool,
+    /// Refuse button acknowledgements, as Telegram does for a press that waited too long.
+    pub refuse_presses: bool,
+    /// The next this many sends fail as a network error would.
+    pub fail_sends: usize,
     /// The offset of every successful get_updates.
     pub offsets: Vec<i64>,
     /// Set the flag once this many get_updates have succeeded.
@@ -43,6 +47,8 @@ impl Default for Fake {
             presses: Vec::new(),
             fail: VecDeque::new(),
             refuse_html: false,
+            refuse_presses: false,
+            fail_sends: 0,
             offsets: Vec::new(),
             stop: None,
             next: 100,
@@ -97,6 +103,13 @@ impl Api for Fake {
         reply_to: Option<i64>,
     ) -> Result<i64, ApiError> {
         self.failing()?;
+        if self.fail_sends > 0 {
+            self.fail_sends -= 1;
+            return Err(ApiError::Retry {
+                after: None,
+                msg: "sendMessage: network down".into(),
+            });
+        }
         self.html(html)?;
         let message_id = self.next;
         self.next += 1;
@@ -134,6 +147,11 @@ impl Api for Fake {
 
     fn answer_press(&mut self, query_id: &str, text: &str) -> Result<(), ApiError> {
         self.failing()?;
+        if self.refuse_presses {
+            return Err(ApiError::Refused(
+                "answerCallbackQuery: 400 Bad Request: query is too old".into(),
+            ));
+        }
         self.presses.push((query_id.into(), text.into()));
         Ok(())
     }

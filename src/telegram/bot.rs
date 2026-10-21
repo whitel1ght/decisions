@@ -16,6 +16,8 @@ use crate::telegram::state::{self, Pending, Sent, State};
 
 pub const UNDO_MS: i64 = 10_000;
 pub const POLL_SECS: u64 = 5;
+/// Finished cards are forgotten a week after they were asked.
+const FORGET_MS: i64 = 7 * 24 * 3600 * 1000;
 pub const HELP: &str = "Cards come here while you're away from the computer.
 Tap an option to answer (10 s to undo), or reply to a card:
   text: answer in your own words
@@ -155,7 +157,7 @@ impl<A: Api> Bot<A> {
         reply_to: Option<i64>,
     ) -> Result<Option<i64>, ApiError> {
         let m = Msg {
-            text: text.into(),
+            text: render::cut(text, render::LIMIT),
             html: false,
         };
         Ok(self.send(chat, &m, &[], reply_to)?.map(|(id, _)| id))
@@ -185,6 +187,10 @@ impl<A: Api> Bot<A> {
         }
     }
 
+    fn note(&mut self, e: &ApiError) {
+        (self.log)(&format!("telegram: {e}"));
+    }
+
     fn message_of(&self, id: &str) -> Result<Option<i64>, ApiError> {
         Ok(self.state()?.messages.get(id).map(|s| s.message_id))
     }
@@ -207,9 +213,15 @@ impl<A: Api> Bot<A> {
         r: crate::store::Result<Event>,
     ) -> Result<(), ApiError> {
         match r {
+            // The answer stands: a failed hook warning or edit must not replay the update.
             Ok(event) => {
-                self.run_hook(chat, id, &event)?;
-                self.close_card(chat, id, false)
+                if let Err(e) = self.run_hook(chat, id, &event) {
+                    self.note(&e);
+                }
+                if let Err(e) = self.close_card(chat, id, false) {
+                    self.note(&e);
+                }
+                Ok(())
             }
             Err(e) => match self.store.outcome(id) {
                 Ok(Outcome::Pending | Outcome::AskedBack(_)) => {
@@ -275,6 +287,15 @@ impl<A: Api> Bot<A> {
                 None => self.close_card(chat, &id, true)?,
             }
         }
+        let now = (self.now)();
+        let old = |m: &Sent| {
+            m.done
+                && chrono::DateTime::parse_from_rfc3339(&m.asked)
+                    .is_ok_and(|t| now - t.timestamp_millis() > FORGET_MS)
+        };
+        if st.messages.values().any(old) {
+            self.update(|s| s.messages.retain(|_, m| !old(m)))?;
+        }
         Ok(())
     }
 
@@ -313,7 +334,9 @@ impl<A: Api> Bot<A> {
         }
         let now = (self.now)();
         for d in self.store.list().0 {
-            if st.messages.contains_key(&d.id) {
+            if let Some(s) = st.messages.get(&d.id)
+                && (s.asked.is_empty() || (s.asked == d.asked && s.question == d.question))
+            {
                 continue;
             }
             let m = render::card(&d, now, self.context);
@@ -335,6 +358,8 @@ impl<A: Api> Bot<A> {
                         text,
                         html,
                         replies: vec![],
+                        asked: d.asked.clone(),
+                        question: d.question.clone(),
                     },
                 );
             })?;
@@ -414,9 +439,14 @@ impl<A: Api> Bot<A> {
             }
             Reply::Ask(q) => {
                 match self.store.ask(&id, &q) {
+                    // Asked: a failed hook warning or confirmation must not ask twice.
                     Ok(event) => {
-                        self.run_hook(chat, &id, &event)?;
-                        self.say(chat, &format!("Asked: {q}"), Some(mid))?;
+                        if let Err(e) = self.run_hook(chat, &id, &event) {
+                            self.note(&e);
+                        }
+                        if let Err(e) = self.say(chat, &format!("Asked: {q}"), Some(mid)) {
+                            self.note(&e);
+                        }
                     }
                     Err(e) => {
                         self.say(chat, &e.0, Some(mid))?;
@@ -443,17 +473,17 @@ impl<A: Api> Bot<A> {
 
     fn press(&mut self, chat: i64, qid: &str, data: &str) -> Result<(), ApiError> {
         let Some(p) = reply::press(data) else {
-            return self.api.answer_press(qid, "");
+            return self.ack(qid, "");
         };
         let id = match &p {
             Press::Answer { id, .. } | Press::Undo { id } => id.clone(),
         };
         let Some(sent) = self.state()?.messages.get(&id).cloned() else {
-            return self.api.answer_press(qid, "");
+            return self.ack(qid, "");
         };
         let open = self.store.list().0.into_iter().find(|d| d.id == id);
         let Some(d) = open.filter(|_| !sent.done) else {
-            self.api.answer_press(qid, "already answered")?;
+            self.ack(qid, "already answered")?;
             return if sent.done {
                 Ok(())
             } else {
@@ -463,7 +493,7 @@ impl<A: Api> Bot<A> {
         match p {
             Press::Answer { n, .. } => {
                 let Some(o) = d.options.iter().find(|o| o.n == n) else {
-                    return self.api.answer_press(qid, "no such option");
+                    return self.ack(qid, "no such option");
                 };
                 let due_ms = (self.now)() + UNDO_MS;
                 self.update(|s| {
@@ -477,7 +507,7 @@ impl<A: Api> Bot<A> {
                         },
                     );
                 })?;
-                self.api.answer_press(qid, "")?;
+                self.ack(qid, "")?;
                 let m =
                     render::with_status(&sent.text, sent.html, &render::pending_line(n, &o.text));
                 self.edit(chat, sent.message_id, &m, &render::undo(&id))
@@ -486,7 +516,7 @@ impl<A: Api> Bot<A> {
                 self.update(|s| {
                     s.pending.remove(&id);
                 })?;
-                self.api.answer_press(qid, "")?;
+                self.ack(qid, "")?;
                 let m = Msg {
                     text: sent.text.clone(),
                     html: sent.html,
@@ -494,6 +524,15 @@ impl<A: Api> Bot<A> {
                 self.edit(chat, sent.message_id, &m, &render::buttons(&d))
             }
         }
+    }
+
+    /// A press's acknowledgement only stops the button's spinner; a refusal (a press that
+    /// waited too long) must never hold up the updates after it.
+    fn ack(&mut self, qid: &str, text: &str) -> Result<(), ApiError> {
+        if let Err(e) = self.api.answer_press(qid, text) {
+            self.note(&e);
+        }
+        Ok(())
     }
 
     fn command(&mut self, chat: i64, mid: i64, c: Command) -> Result<(), ApiError> {
@@ -1151,5 +1190,110 @@ mod tests {
         t.bot.turn().unwrap();
         assert_eq!(t.bot.api.presses, vec![("q1".to_string(), String::new())]);
         assert!(t.bot.api.edits.is_empty());
+    }
+
+    #[test]
+    fn a_refused_button_ack_does_not_block_later_updates() {
+        let mut t = setup(LOG);
+        let id = add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.refuse_presses = true;
+        t.bot
+            .api
+            .updates
+            .extend([tap(1, 100, &format!("a:{id}:1")), msg(2, "/off", None)]);
+        t.bot.turn().unwrap();
+        let s = st(&t);
+        assert_eq!(s.offset, 3);
+        assert!(!s.enabled);
+        assert!(s.pending.contains_key(&id));
+    }
+
+    #[test]
+    fn a_failed_confirmation_does_not_ask_twice() {
+        let mut t = setup(LOG);
+        let id = add(&t, "First?");
+        t.bot.turn().unwrap();
+        t.bot.api.fail_sends = 1;
+        t.bot.api.updates.push(msg(1, "? which run", Some(100)));
+        t.bot.turn().unwrap();
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.store.discussion_count(&id).unwrap(), 1);
+        assert_eq!(events(&t).matches("\"event\":\"asked\"").count(), 1);
+        assert_eq!(st(&t).offset, 2);
+    }
+
+    #[test]
+    fn a_reused_id_is_a_new_card() {
+        let mut t = setup(LOG);
+        let id = add(&t, "Old?");
+        t.bot.turn().unwrap();
+        std::fs::remove_file(t.bot.dir.join(format!("{id}.md"))).unwrap();
+        t.bot.turn().unwrap();
+        assert_eq!(add(&t, "New?"), id);
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.api.sent.len(), 2);
+        assert!(t.bot.api.sent[1].text.contains("New?"));
+        assert!(!st(&t).messages[&id].done);
+    }
+
+    #[test]
+    fn old_finished_cards_are_forgotten() {
+        let mut t = setup(LOG);
+        let recent = chrono::Local::now().to_rfc3339();
+        state::update(&t.bot.dir, |s| {
+            s.messages.insert(
+                "D-9".into(),
+                Sent {
+                    message_id: 5,
+                    done: true,
+                    asked: "2026-01-01T00:00:00+00:00".into(),
+                    ..Sent::default()
+                },
+            );
+            s.messages.insert(
+                "D-8".into(),
+                Sent {
+                    message_id: 6,
+                    done: true,
+                    asked: recent,
+                    ..Sent::default()
+                },
+            );
+        })
+        .unwrap();
+        t.bot.turn().unwrap();
+        let s = st(&t);
+        assert!(!s.messages.contains_key("D-9"));
+        assert!(s.messages.contains_key("D-8"));
+    }
+
+    #[test]
+    fn long_texts_are_cut_to_telegrams_limit() {
+        let mut t = setup(LOG);
+        add(&t, "A?");
+        let b = add(&t, "B?");
+        t.bot.turn().unwrap();
+        let long = "я".repeat(5000);
+        t.bot.api.updates.push(msg(1, &long, Some(100)));
+        t.bot.turn().unwrap();
+        let e = edit_of(&t, 100);
+        assert!(
+            e.text.chars().count() <= render::LIMIT,
+            "{}",
+            e.text.chars().count()
+        );
+        assert!(e.text.contains("✓ your words — я"));
+        t.bot.store.ask(&b, "q").unwrap();
+        t.bot.store.reply(&b, &long).unwrap();
+        t.bot.turn().unwrap();
+        let r = t
+            .bot
+            .api
+            .sent
+            .iter()
+            .find(|o| o.reply_to == Some(101))
+            .unwrap();
+        assert!(r.text.chars().count() <= render::LIMIT);
     }
 }

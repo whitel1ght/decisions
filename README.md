@@ -121,7 +121,8 @@ long-polls Telegram.
 3. `decisions telegram pair`, then send the `/start <code>` it prints to your bot.
 4. Run the service: `decisions telegram run`, or install it to start at login:
    `decisions telegram setup` prints a launchd agent (macOS) or systemd user unit (Linux) with
-   where to save it.
+   where to save it. The unit never carries the token itself, so the installed service needs
+   `token_cmd`; `setup` warns when it is missing or the chat is not paired yet.
 
 While you're away (no keyboard or mouse input for `idle_minutes`), each open card arrives as a
 message with its context and a button per option. Tap an option to answer (10 s to undo), or
