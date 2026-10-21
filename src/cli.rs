@@ -95,6 +95,11 @@ pub enum Cmd {
     },
     /// How to register the MCP server in a harness: claude, codex, gemini, opencode, pi, cursor, generic
     Setup { harness: String },
+    /// Send open decisions to your Telegram chat while you're away, and answer from there
+    Telegram {
+        #[command(subcommand)]
+        cmd: crate::telegram::TgCmd,
+    },
 }
 
 fn refused(e: impl std::fmt::Display) -> ExitCode {
@@ -223,6 +228,7 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
                 }
             }
         }
+        Cmd::Telegram { cmd } => crate::telegram::run(cmd, cfg),
         Cmd::Setup { harness } => match setup::text(&harness) {
             Some(t) => {
                 print!("{t}");
