@@ -23,3 +23,4 @@ signal-hook = "0.4"
 toml = "1"
 tachyonfx = "0.25"
 unicode-width = "0.2"
+ureq = { version = "3", features = ["json"] }
