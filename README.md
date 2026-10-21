@@ -109,6 +109,37 @@ What the agent can get back:
 
 Each card's border turns blue → yellow → orange → red as it waits.
 
+## Telegram
+
+`decisions telegram` sends the open cards to your Telegram chat while you're away from the
+computer, and takes the answers from there. Nothing listens on the network: the service
+long-polls Telegram.
+
+1. Create a bot: talk to [@BotFather](https://t.me/BotFather), send `/newbot`, keep the token.
+2. Give decisions the token: `export DECISIONS_TELEGRAM_TOKEN=…`, or a command that prints it
+   (a password manager, a secrets helper) as `token_cmd` under `[telegram]` in `config.toml`.
+3. `decisions telegram pair`, then send the `/start <code>` it prints to your bot.
+4. Run the service: `decisions telegram run`, or install it to start at login:
+   `decisions telegram setup` prints a launchd agent (macOS) or systemd user unit (Linux) with
+   where to save it.
+
+While you're away (no keyboard or mouse input for `idle_minutes`), each open card arrives as a
+message with its context and a button per option. Tap an option to answer (10 s to undo), or
+reply to the card:
+
+| Reply | Means |
+|---|---|
+| `close it as a duplicate` | an answer in your own words |
+| `2 mention the staging run` | option 2, with a note |
+| `? which QA run` | a question back to the agent; its reply arrives under the card |
+
+Cards answered in the deck change in the chat too. `/off` and `/on` in the chat, or
+`decisions telegram off|on`, stop and restart sending; `/status` and `decisions telegram status`
+show where things stand.
+
+Telegram chats are not end-to-end encrypted. With `context = "none"`, messages carry only the
+question, the options and the link.
+
 ## Configuration
 
 `~/.config/decisions/config.toml` (or `$XDG_CONFIG_HOME/decisions/config.toml`), all optional:
@@ -118,6 +149,11 @@ mode = "always"          # "always": agents send every question here; "on-reques
 wait = 50                # seconds an MCP call waits before returning pending; 0 = no limit
 on_answer = ""           # command run on every answer, own-words answer and ask-back
 mr_strip_prefix = ""     # removed from repository names in short MR labels
+
+[telegram]
+token_cmd = ""           # a command that prints the bot token
+idle_minutes = 5         # away after this long without input; 0 = always send
+context = "full"         # "full" | "none": include each card's context in its message
 ```
 
 | Environment | Overrides |
@@ -125,6 +161,8 @@ mr_strip_prefix = ""     # removed from repository names in short MR labels
 | `DECISIONS_DIR` | where the queue lives (default `~/.local/state/decisions`) |
 | `DECISIONS_WAIT`, `DECISIONS_MODE`, `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP` | the config keys |
 | `DECISIONS_SESSION` | a label added to the cards' "who asked" |
+| `DECISIONS_TELEGRAM_TOKEN` | the bot token itself (wins over `token_cmd`) |
+| `DECISIONS_TELEGRAM_TOKEN_CMD`, `DECISIONS_TELEGRAM_IDLE`, `DECISIONS_TELEGRAM_CONTEXT` | the `[telegram]` keys |
 
 `on_answer` runs with `/bin/sh -c` and gets one JSON line on stdin (10 s limit; a failure warns
 and never undoes the answer):

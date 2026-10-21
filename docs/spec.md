@@ -44,6 +44,7 @@ notifications, Windows, crates.io and Homebrew releases.
 | `decisions close ID` | file an answered or withdrawn decision under `done/<day>/` |
 | `decisions wait ID [--timeout S]` | block until something happens; prints the outcome (as the MCP tools word it); exit 0 answered, 3 still pending, 4 withdrawn, 5 the user asked back |
 | `decisions setup <harness>` | print how to register the MCP server in that harness |
+| `decisions telegram run\|pair\|on\|off\|status\|setup` | the Telegram bot (`docs/telegram.md`) |
 
 Exit codes for the other commands: 0 ok, 1 a refused operation (unknown id, already answered,
 option out of range), 2 usage error.

@@ -16,3 +16,4 @@ jobs:
       - run: cargo test
       - run: tests/cli.sh
       - run: tests/e2e.sh
+      - run: tests/telegram.sh
