@@ -62,6 +62,7 @@ mod tests {
             on_answer: hook.map(String::from),
             mr_strip: String::new(),
             session: None,
+            telegram: Default::default(),
         }
     }
 

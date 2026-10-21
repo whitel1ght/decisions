@@ -374,6 +374,7 @@ mod tests {
             on_answer: None,
             mr_strip: String::new(),
             session: None,
+            telegram: Default::default(),
         }
     }
 
