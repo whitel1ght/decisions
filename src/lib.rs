@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod queue;
 pub mod setup;
 pub mod store;
+pub mod telegram;
 pub mod theme;
 pub mod tui;
 pub mod ui;

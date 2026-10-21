@@ -43,7 +43,7 @@ pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn is_id(s: &str) -> bool {
+pub fn is_id(s: &str) -> bool {
     s.strip_prefix("D-")
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
