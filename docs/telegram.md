@@ -33,7 +33,7 @@ network), live-updating the "waiting" age in sent messages, Windows.
 | `decisions telegram status` | on or off, paired or not, whether the service runs, whether the user counts as away, open cards sent, the last error |
 | `decisions telegram setup` | prints a launchd agent (macOS) or a systemd user unit (Linux) that runs `decisions telegram run` |
 
-Exit codes: 0 ok, 1 a refused operation (not paired, no token, another `run` or `pair` holds the
+Exit codes: 0 ok (`run` also exits 0 when stopped by SIGTERM or SIGINT), 1 a refused operation (not paired, no token, another `run` or `pair` holds the
 lock, pairing timed out), 2 usage error.
 
 ## Config
@@ -69,14 +69,17 @@ exclusive lock on `$DECISIONS_DIR/.telegram.lock`:
   "chat_id": 123456789,
   "enabled": true,
   "offset": 4711,
-  "messages": {"D-7": {"message_id": 42, "done": false, "discussion_seen": 2}},
-  "pending": {"D-7": {"option": 2, "note": "", "due": "2026-10-21T11:20:10+03:00", "message_id": 42}},
+  "messages": {"D-7": {"message_id": 42, "done": false, "discussion_seen": 2, "text": "…", "html": true, "replies": [57]}},
+  "pending": {"D-7": {"option": 2, "note": "", "due_ms": 1792570810000, "message_id": 42}},
   "last_error": null
 }
 ```
 
 - `offset` is the next Telegram update id, so a restart neither replays nor loses updates.
-- `messages` records which card went to which message; a card is sent at most once.
+- `messages` records which card went to which message, the text it was sent with (edits append a
+  status line to it; an answered card is no longer in the open list to render again), and the
+  ids of the bot's thread replies under it (so a reply to those counts as a reply to the card).
+  A card is sent at most once.
 - `pending` holds tapped answers inside their undo window; on start, overdue ones are saved
   first.
 - `run` and `pair` additionally hold `$DECISIONS_DIR/.telegram.run.lock` for their lifetime, so
@@ -103,10 +106,13 @@ reply.
 
 `decisions telegram run` refuses to start (exit 1) without a token source or a paired chat. Then:
 
-- **Threads:** one thread long-polls `getUpdates` (timeout 25 s) and passes updates over a channel;
-  the main thread owns the state and does every send, edit and store write. It wakes on a channel
-  update, a store change (the same watcher the deck uses) and a 5 s tick.
-- **Away:** idle time is read at each wake.
+- **One thread, one loop.** Each turn: save overdue pending answers, bring sent cards up to date,
+  send new cards, then long-poll `getUpdates` with a 5 s timeout and handle what arrives. An
+  update ends the poll at once; otherwise the loop turns every 5 s, so a new card goes out within
+  about 5 s. The store is re-read each turn (a few small files), so no file watcher is needed.
+- **State on disk is the truth.** Every change to `telegram.json` is a read-modify-write under the
+  state lock, so `decisions telegram on`/`off` from the terminal is never overwritten.
+- **Away:** idle time is read each turn.
   - macOS: `HIDIdleTime` from `ioreg -c IOHIDSystem`.
   - Linux: `xprintidle` when it exists.
   - When neither works, the user counts as always away and one warning is logged.
@@ -116,14 +122,14 @@ reply.
   messages already sent stay answerable.
 - **Off:** `enabled: false` stops new sends only. Updates are still handled, so `/on`, taps and
   replies on sent cards keep working, and sent messages are still edited.
-- **Edits:** at each wake, every sent card that is not `done` is checked against the store:
+- **Edits:** each turn, every sent card that is not `done` is checked against the store:
   - answered → "✓ 2 — Push only", buttons removed, `done`;
   - answered in own words → "✓ your words — …", `done`;
   - withdrawn → "withdrawn: reason", `done`;
   - the file is gone (closed or deleted) → buttons removed, `done`;
   - new discussion entries from the session (beyond `discussion_seen`) → each is sent as a new
     message replying to the card's message: "session: the staging one".
-- **Pending answers:** at each wake, those past `due` are saved with `store.answer`, the hook is
+- **Pending answers:** each turn, those past `due_ms` are saved with `store.answer`, the hook is
   run, and the message is edited as above.
 - **Stopping:** SIGTERM or SIGINT ends the loop after the current step; pending answers stay in
   the state and are saved on the next start.
@@ -183,14 +189,15 @@ Reply: text = own words · "2 text" = option 2 with a note · "? text" = ask bac
 ## Chat commands
 
 - `/on`, `/off`: set `enabled`.
-- `/status`: on or off, away or not, and the open cards, each with a link to its message.
+- `/status`: on or off, away or not, and the open cards (`D-7 · question`, marked sent or not yet).
+  Telegram has no links to messages in private chats, so it lists them instead.
 - `/help`: the reply forms and the commands.
 - Anything else starting with `/`: the help.
 
 ## Failures
 
 - **Network errors, 5xx, 429:** retry with backoff from 1 s doubling to 60 s, using Telegram's
-  `retry_after` when given. Failed sends and edits are retried on the next wake. The service never
+  `retry_after` when given. Failed sends and edits are retried on the next turn. The service never
   exits over these. The error goes to stderr and to `last_error`; the next success clears it.
 - **401 or a token command that fails:** logged once, kept in `last_error`, the token is fetched
   again every 60 s; the service keeps running so fixing the secret is enough.
@@ -209,8 +216,11 @@ Reply: text = own words · "2 text" = option 2 with a note · "? text" = ask bac
   Markdown → Telegram HTML, cutting.
 - `src/telegram/reply.rs`: pure parsing of reply text and callback data.
 - `src/telegram/state.rs`: `telegram.json` load and save under the lock.
-- `src/telegram/bot.rs`: the loop, generic over `Api`, the clock and the idle source.
-- `src/telegram/mod.rs`: the commands, `pair` and `setup`.
+- `src/telegram/bot.rs`: one turn of the service (sending, syncing, updates), generic over `Api`,
+  the clock and the idle source.
+- `src/telegram/service.rs`: the loop around turns (backoff, reconnecting with a fresh token,
+  `last_error`, stopping) and `pair`.
+- `src/telegram/mod.rs`: the commands and `setup`.
 - `src/idle.rs`: idle seconds on macOS and Linux.
 - `src/config.rs`: the `[telegram]` section and its overrides.
 
