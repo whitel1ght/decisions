@@ -33,7 +33,7 @@ pi, Cursor, …), and the queue is plain Markdown files you own.
 Rust 1.89 or newer:
 
 ```bash
-cargo install --git https://github.com/whitel1ght/decisions --tag v0.1.0
+cargo install --git https://github.com/whitel1ght/decisions --tag v0.2.0
 decisions --demo        # a made-up queue: try the keys, nothing is read or written
 decisions               # the real queue
 ```
