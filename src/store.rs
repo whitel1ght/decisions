@@ -188,7 +188,7 @@ fn render(doc: &Doc) -> String {
     format!("{}\n", out.trim_end_matches('\n'))
 }
 
-fn write_atomic(path: &Path, text: &str) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().expect("parent");
     fs::create_dir_all(dir).map_err(io)?;
