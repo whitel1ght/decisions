@@ -4,6 +4,7 @@ pub mod config;
 pub mod demo;
 pub mod fx;
 pub mod hook;
+pub mod idle;
 pub mod keys;
 pub mod live;
 pub mod markdown;
