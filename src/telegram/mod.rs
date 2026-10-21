@@ -6,4 +6,5 @@ pub mod bot;
 pub mod fake;
 pub mod render;
 pub mod reply;
+pub mod service;
 pub mod state;
