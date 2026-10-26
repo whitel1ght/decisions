@@ -373,6 +373,8 @@ mod tests {
             wait,
             on_answer: None,
             mr_strip: String::new(),
+            title: "decisions".into(),
+            badge: "✋".into(),
             session: None,
             telegram: Default::default(),
         }

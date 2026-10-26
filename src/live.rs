@@ -61,6 +61,8 @@ mod tests {
             wait: 50,
             on_answer: hook.map(String::from),
             mr_strip: String::new(),
+            title: "decisions".into(),
+            badge: "✋".into(),
             session: None,
             telegram: Default::default(),
         }

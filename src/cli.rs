@@ -189,7 +189,7 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
                 println!(
                     "{}",
                     if badge {
-                        format!("✋ {n}")
+                        format!("{} {n}", cfg.badge)
                     } else {
                         n.to_string()
                     }

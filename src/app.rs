@@ -163,6 +163,7 @@ pub struct State {
     pub quitting: bool,
     pub quit_failed: bool,
     pub demo: bool,
+    pub title: String,
 }
 
 pub fn band(age_ms: i64) -> Band {
@@ -187,6 +188,7 @@ impl State {
     pub fn new(now: i64) -> Self {
         Self {
             now,
+            title: "decisions".into(),
             ..Self::default()
         }
     }

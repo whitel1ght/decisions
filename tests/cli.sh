@@ -53,6 +53,7 @@ rm "$D/D-9.md"
 has "show prints the file" "$(run show D-1)" "## Question"
 run show D-77 >/dev/null; check "show of a missing id exits 1" "1" "$?"
 check "count" "2" "$(run count)"; check "badge" "✋ 2" "$(run count --badge)"
+check "custom badge" "🔧 2" "$(DECISIONS_BADGE=🔧 run count --badge)"
 
 echo "ask, reply, answer, tell and their events"
 run ask D-1 'is it safe?' >/dev/null; check "ask exits 0" "0" "$?"

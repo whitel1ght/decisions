@@ -165,6 +165,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
 
     let mut s = State::new(now_ms());
     s.demo = demo;
+    s.title = cfg.title.clone();
     let mut fx = Fx::default();
     let mut areas = Areas::default();
     let mut runner = Runner {

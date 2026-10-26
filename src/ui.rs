@@ -128,9 +128,9 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
 
 fn header(s: &State) -> String {
     let name = if s.demo {
-        "decisions · demo"
+        format!("{} · demo", s.title)
     } else {
-        "decisions"
+        s.title.clone()
     };
     match s.queue.len() {
         _ if !s.loaded => format!(" {name} · loading… "),
@@ -800,6 +800,17 @@ mod tests {
         app::update(&mut s, Event::Key(Key::Char('q')), T0);
         let all = screen(&render(&s, 80, 24).0);
         assert!(all.contains("sending… · q again to quit anyway"), "{all}");
+    }
+
+    #[test]
+    fn the_header_carries_the_configured_title() {
+        let mut s = state(fixture(), T0);
+        s.title = "frictions".into();
+        let all = screen(&render(&s, 80, 24).0);
+        assert!(all.contains(" frictions · 2 waiting"), "{all}");
+        s.demo = true;
+        let all = screen(&render(&s, 80, 24).0);
+        assert!(all.contains(" frictions · demo · 2 waiting"), "{all}");
     }
 
     #[test]

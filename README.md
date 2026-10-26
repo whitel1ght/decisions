@@ -150,6 +150,8 @@ mode = "always"          # "always": agents send every question here; "on-reques
 wait = 50                # seconds an MCP call waits before returning pending; 0 = no limit
 on_answer = ""           # command run on every answer, own-words answer and ask-back
 mr_strip_prefix = ""     # removed from repository names in short MR labels
+title = "decisions"      # the deck's header name; a second deck can be called something else
+badge = "✋"             # the glyph `decisions count --badge` prints before the number
 
 [telegram]
 token_cmd = ""           # a command that prints the bot token
@@ -160,7 +162,7 @@ context = "full"         # "full" | "none": include each card's context in its m
 | Environment | Overrides |
 |---|---|
 | `DECISIONS_DIR` | where the queue lives (default `~/.local/state/decisions`) |
-| `DECISIONS_WAIT`, `DECISIONS_MODE`, `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP` | the config keys |
+| `DECISIONS_WAIT`, `DECISIONS_MODE`, `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP`, `DECISIONS_TITLE`, `DECISIONS_BADGE` | the config keys |
 | `DECISIONS_SESSION` | a label added to the cards' "who asked" |
 | `DECISIONS_TELEGRAM_TOKEN` | the bot token itself (wins over `token_cmd`) |
 | `DECISIONS_TELEGRAM_TOKEN_CMD`, `DECISIONS_TELEGRAM_IDLE`, `DECISIONS_TELEGRAM_CONTEXT` | the `[telegram]` keys |

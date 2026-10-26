@@ -610,6 +610,8 @@ mod tests {
             wait: 50,
             on_answer: Some(hook.replace("EVENTS", &events.display().to_string())),
             mr_strip: String::new(),
+            title: "decisions".into(),
+            badge: "✋".into(),
             session: None,
             telegram: Default::default(),
         };

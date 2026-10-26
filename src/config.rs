@@ -60,6 +60,8 @@ pub struct Config {
     pub wait: u64,
     pub on_answer: Option<String>,
     pub mr_strip: String,
+    pub title: String,
+    pub badge: String,
     pub session: Option<String>,
     pub telegram: Telegram,
 }
@@ -70,6 +72,8 @@ struct FileConfig {
     wait: Option<u64>,
     on_answer: Option<String>,
     mr_strip_prefix: Option<String>,
+    title: Option<String>,
+    badge: Option<String>,
     telegram: Option<FileTelegram>,
 }
 
@@ -132,6 +136,14 @@ pub fn load_from(env: &dyn Fn(&str) -> Option<String>) -> Result<Config, String>
         wait: file.wait.unwrap_or(50),
         on_answer: file.on_answer.filter(|s| !s.trim().is_empty()),
         mr_strip: file.mr_strip_prefix.unwrap_or_default(),
+        title: file
+            .title
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "decisions".into()),
+        badge: file
+            .badge
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "✋".into()),
         session: None,
         telegram: Telegram::default(),
     };
@@ -155,6 +167,12 @@ pub fn load_from(env: &dyn Fn(&str) -> Option<String>) -> Result<Config, String>
     }
     if let Some(p) = env("DECISIONS_MR_STRIP") {
         c.mr_strip = p;
+    }
+    if let Some(t) = env("DECISIONS_TITLE").filter(|v| !v.is_empty()) {
+        c.title = t;
+    }
+    if let Some(b) = env("DECISIONS_BADGE").filter(|v| !v.is_empty()) {
+        c.badge = b;
     }
     let from = path.display().to_string();
     let ft = file.telegram.unwrap_or_default();
@@ -223,6 +241,36 @@ mod tests {
             ),
             (Mode::Always, 50, None, "", None)
         );
+    }
+
+    #[test]
+    fn title_and_badge_default_then_file_then_environment() {
+        let h = home();
+        let hv = h.to_str().unwrap();
+        let c = load_from(&with(&[("HOME", hv)])).unwrap();
+        assert_eq!((c.title.as_str(), c.badge.as_str()), ("decisions", "✋"));
+        std::fs::create_dir_all(h.join(".config/decisions")).unwrap();
+        std::fs::write(
+            h.join(".config/decisions/config.toml"),
+            "title = \"filed\"\nbadge = \"F\"\n",
+        )
+        .unwrap();
+        let c = load_from(&with(&[("HOME", hv)])).unwrap();
+        assert_eq!((c.title.as_str(), c.badge.as_str()), ("filed", "F"));
+        let c = load_from(&with(&[
+            ("HOME", hv),
+            ("DECISIONS_TITLE", "frictions"),
+            ("DECISIONS_BADGE", "🔧"),
+        ]))
+        .unwrap();
+        assert_eq!((c.title.as_str(), c.badge.as_str()), ("frictions", "🔧"));
+        let c = load_from(&with(&[
+            ("HOME", hv),
+            ("DECISIONS_TITLE", ""),
+            ("DECISIONS_BADGE", ""),
+        ]))
+        .unwrap();
+        assert_eq!((c.title.as_str(), c.badge.as_str()), ("filed", "F"));
     }
 
     #[test]
