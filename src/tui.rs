@@ -52,6 +52,7 @@ impl Runner {
             }
             Command::Ask { id, text } => self.send(id, true, move |d, id| d.ask(id, &text)),
             Command::Tell { id, text } => self.send(id, false, move |d, id| d.tell(id, &text)),
+            Command::Seen { id } => self.send(id, false, |d, id| d.seen(id)),
             Command::OpenUrl(url) => {
                 let _ = std::process::Command::new(OPENER)
                     .arg(url)

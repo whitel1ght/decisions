@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
-use crate::store::{Event, New, Outcome};
+use crate::store::{Event, New, NewAnswer, Outcome};
 use crate::{hook, mcp, setup, tui};
 
 #[derive(Parser)]
@@ -47,6 +47,17 @@ pub enum Cmd {
         #[arg(long)]
         recommend: Option<usize>,
     },
+    /// File an answer to the user's question as a card (the answer on stdin); prints its id
+    Note {
+        #[arg(long, default_value = "")]
+        key: String,
+        #[arg(long, default_value = "")]
+        mr: String,
+        #[arg(long, default_value = "")]
+        source: String,
+        #[arg(long)]
+        question: String,
+    },
     /// Open decisions, blocking first, then oldest first
     List {
         #[arg(long)]
@@ -54,7 +65,8 @@ pub enum Cmd {
     },
     /// Print a decision's file
     Show { id: String },
-    /// How many are open (nothing when none)
+    /// How many questions are open (nothing when none); --badge adds the answer cards
+    #[command(name = "count")]
     Count {
         #[arg(long)]
         badge: bool,
@@ -83,6 +95,8 @@ pub enum Cmd {
         #[arg(required = true)]
         text: Vec<String>,
     },
+    /// The user has read an answer card: file it under done/<day>/
+    Seen { id: String },
     /// No longer needed
     Withdraw { id: String, reason: Vec<String> },
     /// File an answered or withdrawn decision under done/<day>/
@@ -159,6 +173,30 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
                 Err(e) => refused(e),
             }
         }
+        Cmd::Note {
+            key,
+            mr,
+            source,
+            question,
+        } => {
+            let mut answer = String::new();
+            if !std::io::stdin().is_terminal() {
+                let _ = std::io::stdin().read_to_string(&mut answer);
+            }
+            match store.add_answer(NewAnswer {
+                key,
+                mr,
+                source,
+                question,
+                answer,
+            }) {
+                Ok(id) => {
+                    println!("{id}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => refused(e),
+            }
+        }
         Cmd::List { json } => {
             let (_, skipped) = store.list();
             for s in &skipped {
@@ -185,18 +223,26 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
         },
         Cmd::Count { badge } => {
             let n = store.count();
-            if n > 0 {
-                println!(
-                    "{}",
-                    if badge {
-                        format!("{} {n}", cfg.badge)
-                    } else {
-                        n.to_string()
-                    }
-                );
+            let answers = if badge { store.count_answers() } else { 0 };
+            let line = match (badge, n, answers) {
+                (false, 0, _) | (true, 0, 0) => None,
+                (false, n, _) => Some(n.to_string()),
+                (true, 0, a) => Some(format!("✉ {a}")),
+                (true, n, 0) => Some(format!("{} {n}", cfg.badge)),
+                (true, n, a) => Some(format!("{} {n} ✉ {a}", cfg.badge)),
+            };
+            if let Some(line) = line {
+                println!("{line}");
             }
             ExitCode::SUCCESS
         }
+        Cmd::Seen { id } => match store.seen(&id) {
+            Ok(dest) => {
+                println!("{}", dest.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => refused(e),
+        },
         Cmd::Answer { id, n, note } => told(cfg, store.answer(&id, n, &note.join(" "))),
         Cmd::Tell { id, text } => told(cfg, store.tell(&id, &text.join(" "))),
         Cmd::Ask { id, text } => told(cfg, store.ask(&id, &text.join(" "))),

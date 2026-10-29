@@ -41,6 +41,8 @@ notifications, Windows, crates.io and Homebrew releases.
 | `decisions ask ID TEXT` | ask the asker a question back |
 | `decisions reply ID TEXT` | the asker answers that question |
 | `decisions withdraw ID [REASON]` | no longer needed |
+| `decisions note --question Q [--key K] [--mr URL] [--source S]` | file an answer card (the answer on stdin); prints `D-<n>` |
+| `decisions seen ID` | the user has read an answer card: file it under `done/<day>/` |
 | `decisions close ID` | file an answered or withdrawn decision under `done/<day>/` |
 | `decisions wait ID [--timeout S]` | block until something happens; prints the outcome (as the MCP tools word it); exit 0 answered, 3 still pending, 4 withdrawn, 5 the user asked back |
 | `decisions setup <harness>` | print how to register the MCP server in that harness |
@@ -63,8 +65,9 @@ key: ACME-1001
 mr: https://gitlab.com/group/repo/-/merge_requests/870
 asked: 2026-10-20T11:04:08+03:00
 blocks: reply
-status: open            # open | answered | withdrawn
+status: open            # open | answered | withdrawn | seen
 source: claude-code · repo-name · session-label
+kind: answer            # only on answer cards
 ---
 ## Question
 Push the fix and post the reply?
@@ -83,13 +86,20 @@ at: 2026-10-20T11:20:00+03:00
 ```
 
 - An own-words answer is `## Answer` `your words — <text>`.
+- An answer card (`kind: answer`, filed by `tell_user` or `decisions note`) reports a session's
+  answer to the user's question: `## Question` is the user's question, `## Context` the answer,
+  no `## Options`. It cannot be answered, told or asked back; `seen` sets `status: seen`,
+  `## Answer` `seen` with `at:`, and moves it to `done/<day>/` at once. The same source filing
+  the same question while its card is open replaces the answer. Answer cards list after every
+  question; `count` leaves them out (`count --badge` adds `✉ M`). `kind` is written only when
+  non-empty, after `source`.
 - `key`, `mr`, `blocks`, `source` may be empty. `source` is written last and only when
   non-empty, so a file without it stays byte-identical to the older Python format. Options: 2 to 9, at most one `(recommended)`.
 - Numbers never repeat: the next id is one more than the highest in the folder and `done/`.
 - Every write takes an exclusive lock on `$DECISIONS_DIR/.lock`, writes a dot-prefixed temp
   file and renames it into place, so readers never see half a file and concurrent writers never
   lose each other's changes.
-- `list --json` returns every field: `id, key, mr, mr_short, source, question, asked, age,
+- `list --json` returns every field: `id, key, mr, mr_short, source, kind, question, asked, age,
   blocks, question_back, options[{n,text,recommended}], recommended, context,
   discussion[{at,who,text}]`. `question_back` is true when the last discussion entry is the
   user's.
@@ -134,7 +144,9 @@ the agent's system prompt), by `mode`:
 
 - `always`: "When you need a decision, approval or clarification from the user, call `ask_user`
   instead of asking in the chat. Keep working on anything that does not depend on the answer;
-  when you need it, call `wait_for_answer`."
+  when you need it, call `wait_for_answer`. When you answer a question the user asked while
+  you were busy with other work, also file your answer with `tell_user`, so they find it in the
+  same queue instead of scrolling back for it."
 - `on-request`: "If the user asks you to send your questions to the decisions app, use
   `ask_user` for them from then on instead of asking in the chat."
 
@@ -146,6 +158,7 @@ the agent's system prompt), by `mode`:
 | `wait_for_answer` | `id`; optional `timeout_seconds` | an outcome |
 | `reply` | `id`, `text` | ok; answers a question the user asked back |
 | `withdraw` | `id`; optional `reason` | ok |
+| `tell_user` | `question` (the user's), `answer` (markdown); optional `link`, `ticket` | `filed` with the id, at once |
 
 A `ticket` that is not a `KEY-123` key goes into the context as `Ticket: …`. Asking the same
 open question again (same ticket and question) returns the existing id instead of a second card.
@@ -160,6 +173,7 @@ options, so the agent never adds an "Other" option itself.
 - `the user asked back: which QA run? — answer with reply("D-7", text), then call wait_for_answer("D-7")`
 - `pending: D-7 is still open — call wait_for_answer("D-7") when you need the answer`
 - `withdrawn: D-7 (reason)`
+- `seen: the user has read D-7` (an answer card)
 
 **Waiting:**
 
@@ -186,6 +200,8 @@ colours and tachyonfx animations), with these changes:
   subprocess.
 - Card headers show the source: `D-7 · claude-code · repo · acme-1001 · reply`.
 - `on_answer` failures show as a toast.
+- An answer card shows `you asked: <question>`, the answer, and `⏎  Got it`; ⏎ throws it with
+  the same undo window and marks it seen. Numbers, `a` and `n` only say so.
 
 ## `decisions setup <harness>`
 

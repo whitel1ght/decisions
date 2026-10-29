@@ -13,9 +13,11 @@ use serde_json::{Value, json};
 
 use crate::queue::{Decision, Entry, Opt};
 
-const FIELDS: [&str; 8] = [
-    "id", "day", "key", "mr", "asked", "blocks", "status", "source",
+const FIELDS: [&str; 9] = [
+    "id", "day", "key", "mr", "asked", "blocks", "status", "source", "kind",
 ];
+/// `kind` of a card that reports an answer to the user's question; questions have none.
+pub const ANSWER: &str = "answer";
 const SECTIONS: [&str; 5] = ["Question", "Context", "Options", "Discussion", "Answer"];
 const REC: &str = " (recommended)";
 const RECENT_HOURS: i64 = 12;
@@ -121,6 +123,17 @@ impl Doc {
         Ok(())
     }
 
+    fn is_answer(&self) -> bool {
+        self.get("kind") == ANSWER
+    }
+
+    fn require_question(&self, id: &str) -> Result<()> {
+        if self.is_answer() {
+            return fail(format!("{id} is an answer card: mark it seen"));
+        }
+        self.require_open(id)
+    }
+
     fn require_open(&self, id: &str) -> Result<()> {
         match self.get("status") {
             "open" => Ok(()),
@@ -173,7 +186,7 @@ fn parse(text: &str) -> Result<Doc> {
 fn render(doc: &Doc) -> String {
     let mut out = String::from("---\n");
     for k in FIELDS {
-        if k == "source" && doc.get(k).is_empty() {
+        if matches!(k, "source" | "kind") && doc.get(k).is_empty() {
             continue;
         }
         out.push_str(&format!("{k}: {}\n", scalar(doc.get(k))));
@@ -281,6 +294,19 @@ fn mr_short(url: &str, strip: &str) -> String {
     )
 }
 
+fn demote_headings(text: &str) -> String {
+    text.split('\n')
+        .map(|l| {
+            if l.starts_with("## ") {
+                format!("#{l}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -307,6 +333,16 @@ pub struct New {
     pub context: String,
 }
 
+/// An answer to a question the user asked a session, filed so they find it in the deck.
+#[derive(Debug, Clone, Default)]
+pub struct NewAnswer {
+    pub key: String,
+    pub mr: String,
+    pub source: String,
+    pub question: String,
+    pub answer: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Event {
     pub event: &'static str,
@@ -330,6 +366,8 @@ pub enum Outcome {
     Told(String),
     AskedBack(String),
     Withdrawn(String),
+    /// An answer card the user has read.
+    Seen,
 }
 
 impl Outcome {
@@ -347,12 +385,13 @@ impl Outcome {
                 "pending: {id} is still open — call wait_for_answer(\"{id}\") when you need the answer"
             ),
             Outcome::Withdrawn(reason) => format!("withdrawn: {id} ({reason})"),
+            Outcome::Seen => format!("seen: the user has read {id}"),
         }
     }
 
     pub fn exit_code(&self) -> u8 {
         match self {
-            Outcome::Answered { .. } | Outcome::Told(_) => 0,
+            Outcome::Answered { .. } | Outcome::Told(_) | Outcome::Seen => 0,
             Outcome::Pending => 3,
             Outcome::Withdrawn(_) => 4,
             Outcome::AskedBack(_) => 5,
@@ -437,8 +476,11 @@ impl Store {
             }
         }
         docs.sort_by(|a, b| {
-            (a.get("blocks").is_empty(), a.get("asked"))
-                .cmp(&(b.get("blocks").is_empty(), b.get("asked")))
+            (a.is_answer(), a.get("blocks").is_empty(), a.get("asked")).cmp(&(
+                b.is_answer(),
+                b.get("blocks").is_empty(),
+                b.get("asked"),
+            ))
         });
         (docs, skipped)
     }
@@ -451,6 +493,7 @@ impl Store {
             mr: d.get("mr").into(),
             mr_short: mr_short(d.get("mr"), &self.mr_strip),
             source: d.get("source").into(),
+            kind: d.get("kind").into(),
             question: one_line(d.section("Question")),
             asked: d.get("asked").into(),
             blocks: d.get("blocks").into(),
@@ -499,7 +542,9 @@ impl Store {
                 if d.question_back {
                     tail.push_str(" · ?");
                 }
-                let key = if d.key.is_empty() {
+                let key = if d.kind == ANSWER {
+                    ANSWER
+                } else if d.key.is_empty() {
                     "offplan"
                 } else {
                     d.key.as_str()
@@ -514,8 +559,13 @@ impl Store {
             .collect()
     }
 
+    /// Open questions; answer cards are counted by `count_answers`.
     pub fn count(&self) -> usize {
-        self.open_docs().0.len()
+        self.open_docs().0.iter().filter(|d| !d.is_answer()).count()
+    }
+
+    pub fn count_answers(&self) -> usize {
+        self.open_docs().0.iter().filter(|d| d.is_answer()).count()
     }
 
     pub fn show(&self, id: &str) -> Result<String> {
@@ -628,18 +678,7 @@ impl Store {
         }) {
             return fail(format!("{} already asks this", id.get("id")));
         }
-        let context: String = n
-            .context
-            .split('\n')
-            .map(|l| {
-                if l.starts_with("## ") {
-                    format!("#{l}")
-                } else {
-                    l.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let context = demote_headings(&n.context);
         let (id, t) = (self.next_id(), now());
         let mut doc = Doc::default();
         doc.set("id", id.clone());
@@ -668,6 +707,75 @@ impl Store {
         Ok(id)
     }
 
+    /// Files an answer card; the same session filing the same question again while its card
+    /// is open replaces the answer on that card.
+    pub fn add_answer(&self, n: NewAnswer) -> Result<String> {
+        let _lock = self.lock()?;
+        let question = one_line(&n.question);
+        if question.is_empty() {
+            return fail("the question is empty");
+        }
+        if n.answer.trim().is_empty() {
+            return fail("the answer is empty");
+        }
+        let key = n.key.trim().to_uppercase();
+        if !key.is_empty() && !is_key(&key) {
+            return fail(format!("not a ticket key: {}", n.key));
+        }
+        let (source, answer) = (one_line(&n.source), demote_headings(n.answer.trim()));
+        if let Some(mut doc) = self.open_docs().0.into_iter().find(|d| {
+            d.is_answer()
+                && d.get("source") == source
+                && one_line(d.section("Question")) == question
+        }) {
+            let id = doc.get("id").to_string();
+            doc.set_section("Context", answer);
+            doc.set("asked", iso(now()));
+            write_atomic(&self.dir.join(format!("{id}.md")), &render(&doc))?;
+            return Ok(id);
+        }
+        let (id, t) = (self.next_id(), now());
+        let mut doc = Doc::default();
+        doc.set("id", id.clone());
+        doc.set("day", t.format("%Y-%m-%d").to_string());
+        doc.set("key", key);
+        doc.set("mr", n.mr.trim());
+        doc.set("asked", iso(t));
+        doc.set("status", "open");
+        doc.set("source", source);
+        doc.set("kind", ANSWER);
+        doc.set_section("Question", question);
+        doc.set_section("Context", answer);
+        write_atomic(&self.dir.join(format!("{id}.md")), &render(&doc))?;
+        Ok(id)
+    }
+
+    /// The user has read an answer card: it is marked seen and filed under `done/<day>/`.
+    pub fn seen(&self, id: &str) -> Result<PathBuf> {
+        let _lock = self.lock()?;
+        let (p, mut doc) = self.load(id)?;
+        if !doc.is_answer() {
+            return fail(format!("{id} is a question: answer it instead"));
+        }
+        doc.require_open(id)?;
+        doc.set("status", "seen");
+        doc.set_section("Answer", format!("seen\nat: {}", iso(now())));
+        write_atomic(&p, &render(&doc))?;
+        self.move_done(&p, &doc, id)
+    }
+
+    fn move_done(&self, p: &Path, doc: &Doc, id: &str) -> Result<PathBuf> {
+        let day = if doc.get("day").is_empty() {
+            "unknown"
+        } else {
+            doc.get("day")
+        };
+        let dest = self.dir.join("done").join(day).join(format!("{id}.md"));
+        fs::create_dir_all(dest.parent().expect("parent")).map_err(io)?;
+        fs::rename(p, &dest).map_err(io)?;
+        Ok(dest)
+    }
+
     fn event(
         doc: &Doc,
         event: &'static str,
@@ -691,7 +799,7 @@ impl Store {
     pub fn answer(&self, id: &str, n: u8, note: &str) -> Result<Event> {
         let _lock = self.lock()?;
         let (p, mut doc) = self.load(id)?;
-        doc.require_open(id)?;
+        doc.require_question(id)?;
         let opts = options(doc.section("Options"));
         let Some((_, text, _)) = opts.iter().find(|o| o.0 == n) else {
             return fail(format!(
@@ -723,7 +831,7 @@ impl Store {
     pub fn tell(&self, id: &str, text: &str) -> Result<Event> {
         let _lock = self.lock()?;
         let (p, mut doc) = self.load(id)?;
-        doc.require_open(id)?;
+        doc.require_question(id)?;
         let (text, at) = (one_line(text), iso(now()));
         if text.is_empty() {
             return fail("empty text");
@@ -744,7 +852,7 @@ impl Store {
     pub fn ask(&self, id: &str, text: &str) -> Result<Event> {
         let _lock = self.lock()?;
         let (p, mut doc) = self.load(id)?;
-        doc.require_open(id)?;
+        doc.require_question(id)?;
         doc.discuss("you", text)?;
         write_atomic(&p, &render(&doc))?;
         Ok(Self::event(
@@ -781,18 +889,10 @@ impl Store {
     pub fn close(&self, id: &str) -> Result<PathBuf> {
         let _lock = self.lock()?;
         let (p, doc) = self.load(id)?;
-        if !matches!(doc.get("status"), "answered" | "withdrawn") {
+        if !matches!(doc.get("status"), "answered" | "withdrawn" | "seen") {
             return fail(format!("{id} is still open: answer or withdraw it first"));
         }
-        let day = if doc.get("day").is_empty() {
-            "unknown"
-        } else {
-            doc.get("day")
-        };
-        let dest = self.dir.join("done").join(day).join(format!("{id}.md"));
-        fs::create_dir_all(dest.parent().expect("parent")).map_err(io)?;
-        fs::rename(&p, &dest).map_err(io)?;
-        Ok(dest)
+        self.move_done(&p, &doc, id)
     }
 
     /// What the asker should hear now. Reads without the lock: every write is atomic.
@@ -819,6 +919,7 @@ impl Store {
                     }
                 }
             }
+            "seen" => Outcome::Seen,
             "withdrawn" => {
                 let reason = discussion(doc.section("Discussion"))
                     .into_iter()
@@ -1270,6 +1371,108 @@ mod tests {
         );
         s.close("D-1").unwrap();
         assert_eq!(s.find_asked(&n), None, "a closed one does not");
+    }
+
+    fn answer_card(source: &str, q: &str, a: &str) -> NewAnswer {
+        NewAnswer {
+            source: source.into(),
+            question: q.into(),
+            answer: a.into(),
+            ..NewAnswer::default()
+        }
+    }
+
+    #[test]
+    fn an_answer_card_keeps_the_question_and_the_answer_and_has_no_options() {
+        let s = store();
+        let id = s
+            .add_answer(answer_card(
+                "claude-code · repo",
+                "Why did the build fail?",
+                "The **lockfile** was stale.\n\n## Fix\nregenerated",
+            ))
+            .unwrap();
+        let text = s.show(&id).unwrap();
+        assert!(text.contains("kind: answer"), "{text}");
+        assert!(!text.contains("## Options"), "{text}");
+        assert!(
+            text.contains("### Fix"),
+            "headings in the answer cannot fake a section"
+        );
+        let d = &s.list().0[0];
+        assert_eq!(
+            (d.kind.as_str(), d.question.as_str(), d.options.len()),
+            ("answer", "Why did the build fail?", 0)
+        );
+        assert!(d.context.contains("**lockfile**"));
+        assert!(s.list_lines()[0].contains("answer"), "{:?}", s.list_lines());
+        assert!(
+            s.add_answer(answer_card("x", " ", "a")).is_err(),
+            "empty question"
+        );
+        assert!(
+            s.add_answer(answer_card("x", "q", " ")).is_err(),
+            "empty answer"
+        );
+    }
+
+    #[test]
+    fn a_question_card_has_no_kind_line() {
+        let s = store();
+        first(&s);
+        assert!(!s.show("D-1").unwrap().contains("kind:"));
+        assert_eq!(s.list().0[0].kind, "");
+    }
+
+    #[test]
+    fn filing_the_same_answer_again_updates_the_open_card() {
+        let s = store();
+        let a = s
+            .add_answer(answer_card("pi · repo", "Is it merged?", "Not yet."))
+            .unwrap();
+        let b = s
+            .add_answer(answer_card("pi · repo", "Is it merged?", "Yes, at 14:02."))
+            .unwrap();
+        assert_eq!(a, b);
+        assert!(s.show(&a).unwrap().contains("Yes, at 14:02."));
+        let other = s
+            .add_answer(answer_card("codex · x", "Is it merged?", "No."))
+            .unwrap();
+        assert_ne!(a, other, "another session's answer is its own card");
+    }
+
+    #[test]
+    fn seen_files_an_answer_card_away_and_questions_refuse_it() {
+        let s = store();
+        first(&s);
+        let id = s
+            .add_answer(answer_card("pi · repo", "Done?", "Yes."))
+            .unwrap();
+        assert!(
+            s.answer(&id, 1, "").is_err(),
+            "an answer card has no options"
+        );
+        assert!(s.tell(&id, "x").is_err());
+        assert!(s.ask(&id, "x").is_err());
+        assert!(s.seen("D-1").is_err(), "a question is answered, not seen");
+        assert_eq!(s.outcome(&id).unwrap(), Outcome::Pending);
+        let dest = s.seen(&id).unwrap();
+        assert!(dest.starts_with(s.dir.join("done")), "{}", dest.display());
+        assert!(fs::read_to_string(&dest).unwrap().contains("status: seen"));
+        assert_eq!(s.outcome(&id).unwrap(), Outcome::Seen);
+        assert!(s.seen(&id).is_err(), "seen twice");
+        assert_eq!(s.list().0.len(), 1);
+    }
+
+    #[test]
+    fn answer_cards_come_after_questions_and_count_apart() {
+        let s = store();
+        s.add_answer(answer_card("pi · repo", "Old answer?", "Yes."))
+            .unwrap();
+        s.add(new("", "Later question?", &["a", "b"])).unwrap();
+        let ids: Vec<String> = s.list().0.into_iter().map(|d| d.id).collect();
+        assert_eq!(ids, ["D-2", "D-1"]);
+        assert_eq!((s.count(), s.count_answers()), (1, 1));
     }
 
     #[test]

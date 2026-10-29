@@ -40,8 +40,17 @@ pub fn parse(text: &str, options: &[u8]) -> Reply {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Press {
-    Answer { id: String, n: u8 },
-    Undo { id: String },
+    Answer {
+        id: String,
+        n: u8,
+    },
+    Undo {
+        id: String,
+    },
+    /// The user has read an answer card.
+    Seen {
+        id: String,
+    },
 }
 
 pub fn answer_data(id: &str, n: u8) -> String {
@@ -50,6 +59,10 @@ pub fn answer_data(id: &str, n: u8) -> String {
 
 pub fn undo_data(id: &str) -> String {
     format!("u:{id}")
+}
+
+pub fn seen_data(id: &str) -> String {
+    format!("s:{id}")
 }
 
 pub fn press(data: &str) -> Option<Press> {
@@ -64,6 +77,7 @@ pub fn press(data: &str) -> Option<Press> {
             })
         }
         (Some("u"), Some(id), None, None) if is_id(id) => Some(Press::Undo { id: id.into() }),
+        (Some("s"), Some(id), None, None) if is_id(id) => Some(Press::Seen { id: id.into() }),
         _ => None,
     }
 }
@@ -135,6 +149,8 @@ mod tests {
             })
         );
         assert_eq!(press("u:D-7"), Some(Press::Undo { id: "D-7".into() }));
+        assert_eq!(seen_data("D-7"), "s:D-7");
+        assert_eq!(press("s:D-7"), Some(Press::Seen { id: "D-7".into() }));
         for bad in [
             "", "a:D-7", "a:D-7:x", "a:X-7:1", "u:D-", "u:D-7:1", "zzz", "a:D-7:+1",
         ] {

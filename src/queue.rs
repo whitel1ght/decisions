@@ -32,6 +32,9 @@ pub struct Decision {
     pub mr_short: String,
     #[serde(default)]
     pub source: String,
+    /// `answer` for a card reporting an answer to the user's question; empty for a question.
+    #[serde(default)]
+    pub kind: String,
     pub question: String,
     pub asked: String,
     #[serde(default)]
@@ -49,6 +52,11 @@ pub struct Decision {
 }
 
 impl Decision {
+    /// A card reporting an answer to the user's question, not a question.
+    pub fn is_answer(&self) -> bool {
+        self.kind == "answer"
+    }
+
     /// When it was asked, in unix milliseconds; None when `asked` is not RFC 3339.
     pub fn asked_ms(&self) -> Option<i64> {
         chrono::DateTime::parse_from_rfc3339(&self.asked)
@@ -68,6 +76,7 @@ pub trait Backend: Send + Sync {
     fn answer(&self, id: &str, n: u8, note: Option<&str>) -> Result<Option<String>, String>;
     fn ask(&self, id: &str, text: &str) -> Result<Option<String>, String>;
     fn tell(&self, id: &str, text: &str) -> Result<Option<String>, String>;
+    fn seen(&self, id: &str) -> Result<Option<String>, String>;
 }
 
 #[cfg(test)]

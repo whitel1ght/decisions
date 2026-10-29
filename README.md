@@ -86,6 +86,14 @@ What the agent can get back:
 | `pending: D-7 is still open …` | not answered yet |
 | `withdrawn: D-7 (…)` | the question was withdrawn |
 
+## Answers to your questions
+
+You ask a session something while it is busy (mid-task, agents running) and the answer arrives
+when you have moved on. The session files it with `tell_user`: an answer card with your question
+and its answer, no options, after the questions in the deck (`✉ answer` on the card, `1 answer`
+in the header, `✉ N` on the badge). `⏎` marks it seen and files it away (5 s to undo); in
+Telegram it comes with one `✓ Got it` button. `tell_user` returns at once: nothing waits on it.
+
 ## Answering
 
 | Key | |
@@ -94,7 +102,7 @@ What the agent can get back:
 | `j / k` | move between the options (back: scroll) |
 | `g / G` | first / last option (back: top / bottom) |
 | `1-9` | answer with that option |
-| `⏎` | option under the cursor, else ★ |
+| `⏎` | option under the cursor, else ★; on an answer card, got it |
 | `space` | flip the card: context and discussion |
 | `^d / ^u` | page the back |
 | `u` | undo the last answer (5 s) |
@@ -186,10 +194,12 @@ For scripts and agents without MCP:
 | `decisions add --question Q --option A --option B [--recommend N] [--key K] [--mr URL] [--blocks T] [--source S]` | file a question (context on stdin); prints `D-<n>` |
 | `decisions list [--json]` | open decisions |
 | `decisions show ID` | the decision file |
-| `decisions count [--badge]` | how many are open (`--badge`: `✋ N`) |
+| `decisions count [--badge]` | how many questions are open (`--badge`: `✋ N`, plus `✉ M` for answer cards) |
+| `decisions note --question Q [--key K] [--mr URL] [--source S]` | file an answer card (the answer on stdin); prints `D-<n>` |
+| `decisions seen ID` | mark an answer card read and file it under `done/<day>/` |
 | `decisions answer ID N [NOTE]` / `tell ID TEXT` / `ask ID TEXT` | answer, answer in your own words, ask back |
 | `decisions reply ID TEXT` / `withdraw ID [REASON]` / `close ID` | the asker's side |
-| `decisions wait ID [--timeout S]` | block until something happens (exit 0 answered, 3 pending, 4 withdrawn, 5 asked back) |
+| `decisions wait ID [--timeout S]` | block until something happens (exit 0 answered or seen, 3 pending, 4 withdrawn, 5 asked back) |
 | `decisions setup HARNESS` | how to connect a harness |
 
 The queue is one Markdown file per decision in `DECISIONS_DIR`; closed ones move to

@@ -58,6 +58,10 @@ pub enum Command {
         id: String,
         text: String,
     },
+    /// The user has read an answer card.
+    Seen {
+        id: String,
+    },
     OpenUrl(String),
     Quit,
 }
@@ -455,7 +459,21 @@ fn to_front(s: &mut State, id: &str) {
     }
 }
 
+/// On an answer card the only action is ⏎ (seen); other answering keys say so.
+fn answer_card_hint(s: &mut State) -> bool {
+    let Some(id) = s.current().filter(|d| d.is_answer()).map(|d| d.id.clone()) else {
+        return false;
+    };
+    s.toast(format!(
+        "{id} is an answer to your question: ⏎ marks it seen"
+    ));
+    true
+}
+
 fn choose(s: &mut State, n: u8, out: &mut Vec<Command>) {
+    if answer_card_hint(s) {
+        return;
+    }
     let Some(d) = s.current() else { return };
     if usize::from(n) == d.options.len() + 1 {
         open_tell(s);
@@ -478,6 +496,9 @@ fn enter(s: &mut State, out: &mut Vec<Command>) {
     if let Some(f) = s.failed.get(&d.id) {
         let (n, note, custom) = (f.n, f.note.clone(), f.custom.clone());
         return throw(s, n, note, custom, out);
+    }
+    if d.is_answer() {
+        return throw(s, 0, None, None, out);
     }
     if s.cursor == Some(d.options.len()) {
         return open_tell(s);
@@ -530,6 +551,7 @@ fn send_pending(s: &mut State, out: &mut Vec<Command>) {
     if let Some(p) = s.pending.take() {
         let id = p.decision.id.clone();
         out.push(match &p.custom {
+            _ if p.decision.is_answer() => Command::Seen { id: id.clone() },
             Some(text) => Command::Tell {
                 id: id.clone(),
                 text: text.clone(),
@@ -555,6 +577,12 @@ fn undo(s: &mut State) {
 
 /// n: a note on the answer in its undo window, else a note on the current card.
 fn note(s: &mut State) {
+    if s.pending.as_ref().is_some_and(|p| p.decision.is_answer()) {
+        return;
+    }
+    if s.pending.is_none() && answer_card_hint(s) {
+        return;
+    }
     if let Some(p) = s.pending.as_mut() {
         p.paused = true;
         s.input = Some(Input {
@@ -571,6 +599,9 @@ fn note(s: &mut State) {
 }
 
 fn ask(s: &mut State) {
+    if answer_card_hint(s) {
+        return;
+    }
     if let Some(id) = s.current().map(|d| d.id.clone()) {
         let text = s
             .ask_failed
@@ -1004,6 +1035,77 @@ mod tests {
         );
         assert!(s.pending.is_none());
         assert!(s.sending.contains_key("D-1"));
+    }
+
+    pub fn answer_card(id: &str) -> Decision {
+        let mut d = fixture()[1].clone();
+        d.id = id.into();
+        d.kind = "answer".into();
+        d.options.clear();
+        d.recommended = None;
+        d.question = "Why is CI red?".into();
+        d.context = "A flaky e2e test.".into();
+        d
+    }
+
+    #[test]
+    fn enter_marks_an_answer_card_seen_after_the_undo_window() {
+        let mut s = loaded(vec![answer_card("D-5"), fixture()[0].clone()]);
+        assert!(press(&mut s, Key::Enter).is_empty());
+        assert_eq!(ids(&s), ["D-1"]);
+        assert!(update(&mut s, Event::Tick, T0 + UNDO_MS - 1).is_empty());
+        assert_eq!(
+            update(&mut s, Event::Tick, T0 + UNDO_MS),
+            [Command::Seen { id: "D-5".into() }]
+        );
+        assert!(s.sending.contains_key("D-5"));
+    }
+
+    #[test]
+    fn undo_brings_an_answer_card_back() {
+        let mut s = loaded(vec![answer_card("D-5")]);
+        press(&mut s, Key::Enter);
+        press(&mut s, Key::Char('u'));
+        assert_eq!(ids(&s), ["D-5"]);
+        assert!(update(&mut s, Event::Tick, T0 + UNDO_MS).is_empty());
+    }
+
+    #[test]
+    fn numbers_ask_back_and_notes_do_nothing_on_an_answer_card() {
+        let mut s = loaded(vec![answer_card("D-5")]);
+        for k in [
+            Key::Char('1'),
+            Key::Char('2'),
+            Key::Char('a'),
+            Key::Char('n'),
+        ] {
+            assert!(press(&mut s, k).is_empty(), "{k:?}");
+            assert!(s.input.is_none(), "{k:?} opened an input");
+            assert!(s.pending.is_none(), "{k:?} threw the card");
+        }
+        assert!(s.toast.as_ref().unwrap().0.contains("⏎"), "{:?}", s.toast);
+    }
+
+    #[test]
+    fn a_failed_seen_comes_back_and_enter_retries_it() {
+        let mut s = loaded(vec![answer_card("D-5")]);
+        press(&mut s, Key::Enter);
+        update(&mut s, Event::Tick, T0 + UNDO_MS);
+        update(
+            &mut s,
+            Event::Sent {
+                id: "D-5".into(),
+                ask: false,
+                result: Err("disk full".into()),
+            },
+            T0 + UNDO_MS,
+        );
+        assert_eq!(ids(&s), ["D-5"]);
+        press(&mut s, Key::Enter);
+        assert_eq!(
+            update(&mut s, Event::Tick, T0 + 2 * UNDO_MS),
+            [Command::Seen { id: "D-5".into() }]
+        );
     }
 
     #[test]

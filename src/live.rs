@@ -40,6 +40,10 @@ impl Backend for Live {
     fn tell(&self, id: &str, text: &str) -> Result<Option<String>, String> {
         self.after(self.store.tell(id, text))
     }
+
+    fn seen(&self, id: &str) -> Result<Option<String>, String> {
+        self.store.seen(id).map(|_| None).map_err(|e| e.0)
+    }
 }
 
 #[cfg(test)]

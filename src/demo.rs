@@ -60,6 +60,7 @@ fn card(
         mr,
         mr_short,
         source: "demo".into(),
+        kind: String::new(),
         question: question.into(),
         asked: iso(asked),
         blocks: blocks.into(),
@@ -171,6 +172,21 @@ impl Demo {
                 "The staging run from this morning, all 42 checks green.",
             ),
         ];
+        let mut answer = card(
+            "D-12",
+            "",
+            None,
+            "",
+            now - 30 * MIN,
+            "Why did last night's pipeline fail?",
+            &[],
+            None,
+            "You asked this while the session was busy with a review. **A flaky e2e test**: \
+             `RetrieveV2ItemSpec` timed out once and passed on the retry.\n\n\
+             An answer card has no options: ⏎ marks it seen.",
+        );
+        answer.kind = "answer".into();
+        answer.source = "claude-code · acme-backend".into();
         Self {
             state: Mutex::new(DemoState {
                 open: vec![
@@ -247,6 +263,7 @@ impl Demo {
                         Some(1),
                         LONG_CONTEXT,
                     ),
+                    answer,
                 ],
                 arrivals: vec![
                     card(
@@ -334,6 +351,10 @@ impl Backend for Demo {
         self.answer(id, 0, None)
     }
 
+    fn seen(&self, id: &str) -> Result<Option<String>, String> {
+        self.answer(id, 0, None)
+    }
+
     fn answer(&self, id: &str, _n: u8, _note: Option<&str>) -> Result<Option<String>, String> {
         if id == FAILS_ANSWER {
             return Err("demo: answering this card always fails".into());
@@ -399,13 +420,17 @@ mod tests {
     }
 
     #[test]
-    fn starts_with_eight_cards_oldest_first_covering_every_age_band() {
+    fn starts_with_eight_questions_oldest_first_then_an_answer_card() {
         let (demo, _) = demo();
-        let list = demo.list().unwrap();
+        let mut list = demo.list().unwrap();
         assert_eq!(
             ids(&list),
-            ["D-1", "D-2", "D-3", "D-4", "D-5", "D-6", "D-7", "D-8"]
+            [
+                "D-1", "D-2", "D-3", "D-4", "D-5", "D-6", "D-7", "D-8", "D-12"
+            ]
         );
+        let answer = list.pop().unwrap();
+        assert!(answer.is_answer() && answer.options.is_empty());
         let bands: Vec<Band> = list.iter().map(|d| band(age(d, T0))).collect();
         for b in [Band::Fresh, Band::Warm, Band::Old, Band::Stale] {
             assert!(bands.contains(&b), "{b:?} missing");
@@ -477,13 +502,13 @@ mod tests {
     #[test]
     fn new_decisions_arrive_every_twenty_seconds_three_times() {
         let (demo, now) = demo();
-        assert_eq!(demo.list().unwrap().len(), 8);
+        assert_eq!(demo.list().unwrap().len(), 9);
         now.fetch_add(ARRIVE_EVERY_MS, Ordering::Relaxed);
         assert_eq!(ids(&demo.list().unwrap()).last(), Some(&"D-9"));
         now.fetch_add(10 * ARRIVE_EVERY_MS, Ordering::Relaxed);
         let list = demo.list().unwrap();
-        assert_eq!(list.len(), 11);
-        assert_eq!(ids(&list)[8..], ["D-9", "D-10", "D-11"]);
+        assert_eq!(list.len(), 12);
+        assert_eq!(ids(&list)[9..], ["D-9", "D-10", "D-11"]);
     }
 
     #[test]

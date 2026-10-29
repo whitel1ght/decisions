@@ -36,6 +36,7 @@ const KEYS: &[(&str, &str)] = &[
     ("g / G", "first / last option (back: top / bottom)"),
     ("1-9", "answer with that option"),
     ("⏎", "option under the cursor, else ★"),
+    ("⏎ on ✉", "an answer to your question: got it"),
     ("↑ / ↓", "same as j / k"),
     ("space", "flip: context and discussion"),
     ("^d / ^u", "page the back"),
@@ -132,11 +133,23 @@ fn header(s: &State) -> String {
     } else {
         s.title.clone()
     };
+    let answers = s.queue.iter().filter(|d| d.is_answer()).count();
+    let mut counts = Vec::new();
+    match s.queue.len() - answers {
+        0 => {}
+        n => counts.push(format!("{n} waiting")),
+    }
+    match answers {
+        0 => {}
+        1 => counts.push("1 answer".into()),
+        n => counts.push(format!("{n} answers")),
+    }
     match s.queue.len() {
         _ if !s.loaded => format!(" {name} · loading… "),
         0 => format!(" {name} · nothing waiting "),
-        n => format!(
-            " {name} · {n} waiting · oldest {} ",
+        _ => format!(
+            " {name} · {} · oldest {} ",
+            counts.join(" · "),
             age_label(s.oldest_ms())
         ),
     }
@@ -155,6 +168,9 @@ fn footer(s: &State) -> String {
             "j/k scroll · ^d/^u page · J/K cards · space front · 1-9 answer · ? help"
         }
         (None, false, Side::Front, Some(_)) => "u undo · n note · J/K cards · 1-9 answer · ? help",
+        (None, false, Side::Front, None) if s.current().is_some_and(|d| d.is_answer()) => {
+            "J/K cards · ⏎ got it · space full answer · ? help"
+        }
         (None, false, Side::Front, None) => {
             "J/K cards · j/k options · 1-9 answer · ⏎ pick · space flip · ? help"
         }
@@ -185,6 +201,7 @@ fn status(s: &State) -> Option<Line<'static>> {
     }
     if let Some(p) = &s.pending {
         let choice = match &p.custom {
+            _ if p.decision.is_answer() => "seen".to_string(),
             Some(text) => format!("✎ {text}"),
             None => {
                 let text = p
@@ -300,6 +317,12 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
             ));
         }
     }
+    if d.is_answer() {
+        title.push(Span::styled(
+            " · ✉ answer",
+            Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
+        ));
+    }
     title.push(Span::raw(" "));
     if d.question_back {
         title.push(Span::styled(
@@ -310,6 +333,9 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
     let block = card_block(theme::band_color(band(age)))
         .title(Line::from(title))
         .title_top(Line::from(format!(" ⏱ {} ", age_label(age))).right_aligned());
+    if d.is_answer() {
+        return answer_front(f, s, d, rect, block);
+    }
     let mut lines = vec![
         Line::styled(
             d.question.clone(),
@@ -385,6 +411,43 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
             .block(block),
         rect,
     );
+}
+
+/// The front of an answer card: the user's question, the session's answer, and ⏎.
+fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block<'static>) {
+    let mut lines = vec![
+        Line::styled(
+            format!("you asked: {}", d.question),
+            Style::new().fg(theme::MUTED).add_modifier(Modifier::BOLD),
+        ),
+        Line::default(),
+    ];
+    if let Some(fl) = s.failed.get(&d.id) {
+        lines.push(Line::styled(
+            format!("send failed: {} · ⏎ retries", fl.error),
+            Style::new().fg(theme::RED),
+        ));
+        lines.push(Line::default());
+    }
+    let mut tail = vec![
+        Line::default(),
+        Line::styled(
+            "⏎  Got it",
+            Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let room = usize::from(rect.height.saturating_sub(3)).saturating_sub(lines.len() + tail.len());
+    let mut answer = markdown::render(&d.context, rect.width.saturating_sub(4));
+    if answer.len() > room {
+        answer.truncate(room.saturating_sub(1));
+        answer.push(Line::styled(
+            "… space: the full answer",
+            Style::new().fg(theme::MUTED),
+        ));
+    }
+    lines.extend(answer);
+    lines.append(&mut tail);
+    f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 /// Draws the back; returns how far it can scroll.
@@ -870,6 +933,62 @@ mod tests {
         let all = screen(&render(&state(list, T0), 100, 24).0);
         assert!(
             all.contains("D-1 · claude-code · repo · acme-1001 · backend!870 · reply"),
+            "{all}"
+        );
+    }
+
+    fn answer_card() -> Decision {
+        let mut d = fixture()[1].clone();
+        d.id = "D-5".into();
+        d.kind = "answer".into();
+        d.source = "pi · repo".into();
+        d.key.clear();
+        d.mr_short.clear();
+        d.blocks.clear();
+        d.options.clear();
+        d.recommended = None;
+        d.question = "Why is CI red?".into();
+        d.context = "A **flaky** e2e test.\n\nIt passed on the retry.".into();
+        d
+    }
+
+    #[test]
+    fn an_answer_card_shows_the_question_the_answer_and_got_it() {
+        let s = state(vec![answer_card()], T0);
+        let all = screen(&render(&s, 80, 24).0);
+        for want in [
+            "D-5 · pi · repo · ✉ answer",
+            "you asked: Why is CI red?",
+            "A flaky e2e test.",
+            "It passed on the retry.",
+            "⏎  Got it",
+            "J/K cards · ⏎ got it · space full answer · ? help",
+        ] {
+            assert!(all.contains(want), "{want:?} missing:\n{all}");
+        }
+        assert!(!all.contains("Something else"), "{all}");
+        assert!(
+            all.contains("1 answer"),
+            "header counts answers apart:\n{all}"
+        );
+    }
+
+    #[test]
+    fn the_undo_bar_says_seen_for_an_answer_card() {
+        let mut s = state(vec![answer_card()], T0);
+        app::update(&mut s, Event::Key(app::Key::Enter), T0);
+        let all = screen(&render(&s, 80, 24).0);
+        assert!(all.contains("✓ D-5 → seen"), "{all}");
+    }
+
+    #[test]
+    fn the_header_counts_questions_and_answers_apart() {
+        let mut list = fixture();
+        list.push(answer_card());
+        let s = state(list, T0 + 13 * MIN);
+        let all = screen(&render(&s, 80, 24).0);
+        assert!(
+            all.contains("decisions · 2 waiting · 1 answer · oldest 13m"),
             "{all}"
         );
     }

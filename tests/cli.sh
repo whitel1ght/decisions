@@ -88,6 +88,23 @@ run close D-1 >/dev/null; run close "$wid" >/dev/null
 check "wait finds a closed one" "0" "$("$BIN" wait D-1 >/dev/null; echo $?)"
 check "numbering continues past done/" "D-$(( ${wid#D-} + 1 ))" "$(run add --key ACME-3 --question 'Next?' --option a --option b </dev/null)"
 
+echo "answer cards"
+before="$(run count)"
+aid="$(printf 'A **flaky** e2e test.\n' | run note --source 'pi · repo' --question 'Why is CI red?')"
+has "note prints an id" "$aid" "D-"
+has "the file is an answer card" "$(run show "$aid")" "kind: answer"
+has "list marks it" "$(run list | grep "^$aid ")" " answer "
+check "list --json kind" "answer" "$(run list --json | jq -r --arg i "$aid" '.[] | select(.id==$i) | .kind')"
+check "count leaves answers out" "$before" "$(run count)"
+check "the badge shows them apart" "✋ $before ✉ 1" "$(run count --badge)"
+run answer "$aid" 1 >/dev/null; check "an answer card cannot be answered" "1" "$?"
+run note --question 'Empty?' </dev/null >/dev/null; check "a note needs an answer on stdin" "1" "$?"
+run seen "$aid" >/dev/null; check "seen exits 0" "0" "$?"
+[ -f "$D/done/$(date +%F)/$aid.md" ] && pass "seen files it under done/<day>" || fail "seen files it under done/<day>" "$(find "$D" -name "$aid.md")"
+check "wait on a seen one" "seen: the user has read $aid" "$("$BIN" wait "$aid")"
+run seen D-2 >/dev/null; check "a question cannot be seen" "1" "$?"
+check "no answers, no envelope" "✋ $before" "$(run count --badge)"
+
 echo "setup"
 for h in claude codex gemini opencode pi cursor generic; do
   has "setup $h names the server command" "$(run setup $h)" "decisions mcp"

@@ -431,6 +431,14 @@ impl<A: Api> Bot<A> {
             self.say(chat, &format!("{id} is already answered."), Some(mid))?;
             return self.close_card(chat, &id, true);
         };
+        if d.is_answer() {
+            self.say(
+                chat,
+                &format!("{id} is an answer to your question: tap ✓ Got it once you've read it."),
+                Some(mid),
+            )?;
+            return Ok(());
+        }
         let options: Vec<u8> = d.options.iter().map(|o| o.n).collect();
         match reply::parse(text, &options) {
             Reply::Empty => {
@@ -476,7 +484,7 @@ impl<A: Api> Bot<A> {
             return self.ack(qid, "");
         };
         let id = match &p {
-            Press::Answer { id, .. } | Press::Undo { id } => id.clone(),
+            Press::Answer { id, .. } | Press::Undo { id } | Press::Seen { id } => id.clone(),
         };
         let Some(sent) = self.state()?.messages.get(&id).cloned() else {
             return self.ack(qid, "");
@@ -491,6 +499,13 @@ impl<A: Api> Bot<A> {
             };
         };
         match p {
+            Press::Seen { .. } => match self.store.seen(&id) {
+                Ok(_) => {
+                    self.ack(qid, "")?;
+                    self.close_card(chat, &id, false)
+                }
+                Err(e) => self.ack(qid, &e.0),
+            },
             Press::Answer { n, .. } => {
                 let Some(o) = d.options.iter().find(|o| o.n == n) else {
                     return self.ack(qid, "no such option");
@@ -719,6 +734,68 @@ mod tests {
         assert_eq!(s.messages["D-1"].message_id, 100);
         assert_eq!(s.messages["D-1"].text, t.bot.api.sent[0].text);
         assert!(s.messages["D-1"].html && !s.messages["D-1"].done);
+    }
+
+    fn add_answer(t: &T) -> String {
+        t.bot
+            .store
+            .add_answer(crate::store::NewAnswer {
+                source: "pi · repo".into(),
+                question: "Why is CI red?".into(),
+                answer: "A **flaky** e2e test.".into(),
+                ..Default::default()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn an_answer_card_goes_with_one_got_it_button_and_a_tap_marks_it_seen() {
+        let mut t = setup(LOG);
+        let id = add_answer(&t);
+        t.bot.turn().unwrap();
+        let sent = &t.bot.api.sent[0];
+        assert!(sent.text.starts_with("✉ "), "{}", sent.text);
+        assert!(
+            sent.text.contains("you asked: Why is CI red?"),
+            "{}",
+            sent.text
+        );
+        assert!(sent.text.contains("<b>flaky</b>"), "{}", sent.text);
+        assert!(
+            !sent.text.contains("own words"),
+            "no reply hint: {}",
+            sent.text
+        );
+        assert_eq!(sent.keyboard.len(), 1);
+        assert_eq!(sent.keyboard[0][0].data, format!("s:{id}"));
+        t.bot.handle(&tap(1, 100, &format!("s:{id}"))).unwrap();
+        assert_eq!(t.bot.store.outcome(&id).unwrap(), Outcome::Seen);
+        let e = edit_of(&t, 100);
+        assert!(e.text.contains("✓ seen"), "{}", e.text);
+        assert!(e.keyboard.is_empty());
+        assert!(st(&t).messages[&id].done);
+        assert!(events(&t).is_empty(), "seen runs no hook");
+    }
+
+    #[test]
+    fn a_reply_to_an_answer_card_says_how_to_close_it() {
+        let mut t = setup(LOG);
+        let id = add_answer(&t);
+        t.bot.turn().unwrap();
+        t.bot.handle(&msg(1, "thanks", Some(100))).unwrap();
+        assert_eq!(t.bot.store.outcome(&id).unwrap(), Outcome::Pending);
+        let said = t.bot.api.sent.last().unwrap();
+        assert!(said.text.contains("Got it"), "{}", said.text);
+    }
+
+    #[test]
+    fn an_answer_card_seen_in_the_deck_is_closed_in_the_chat() {
+        let mut t = setup(LOG);
+        let id = add_answer(&t);
+        t.bot.turn().unwrap();
+        t.bot.store.seen(&id).unwrap();
+        t.bot.turn().unwrap();
+        assert!(edit_of(&t, 100).text.contains("✓ seen (in the deck)"));
     }
 
     #[test]

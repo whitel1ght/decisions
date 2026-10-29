@@ -167,9 +167,14 @@ pub fn header(d: &Decision, now_ms: i64) -> String {
         }
     }
     if let Some(at) = d.asked_ms() {
-        parts.push(format!("waiting {}", age_label(now_ms - at)));
+        parts.push(if d.is_answer() {
+            format!("answered {} ago", age_label(now_ms - at))
+        } else {
+            format!("waiting {}", age_label(now_ms - at))
+        });
     }
-    format!("✋ {}", parts.join(" · "))
+    let mark = if d.is_answer() { "✉" } else { "✋" };
+    format!("{mark} {}", parts.join(" · "))
 }
 
 fn build(d: &Decision, now_ms: i64, ctx: Context, limit: usize) -> String {
@@ -178,7 +183,11 @@ fn build(d: &Decision, now_ms: i64, ctx: Context, limit: usize) -> String {
         s.push('\n');
         s.push_str(&escape(&d.source));
     }
-    s.push_str(&format!("\n\n<b>{}</b>", escape(&d.question)));
+    if d.is_answer() {
+        s.push_str(&format!("\n\n<b>you asked: {}</b>", escape(&d.question)));
+    } else {
+        s.push_str(&format!("\n\n<b>{}</b>", escape(&d.question)));
+    }
     if ctx == Context::Full && limit > 0 && !d.context.trim().is_empty() {
         s.push_str("\n\n");
         s.push_str(&md_to_html(&cut(d.context.trim(), limit)));
@@ -195,8 +204,10 @@ fn build(d: &Decision, now_ms: i64, ctx: Context, limit: usize) -> String {
             escape(label)
         ));
     }
-    s.push('\n');
-    s.push_str(&escape(HINT));
+    if !d.is_answer() {
+        s.push('\n');
+        s.push_str(&escape(HINT));
+    }
     s
 }
 
@@ -223,6 +234,12 @@ pub fn card(d: &Decision, now_ms: i64, ctx: Context) -> Msg {
 }
 
 pub fn buttons(d: &Decision) -> Keyboard {
+    if d.is_answer() {
+        return vec![vec![Button {
+            text: "✓ Got it".into(),
+            data: reply::seen_data(&d.id),
+        }]];
+    }
     d.options
         .iter()
         .map(|o| {
@@ -260,6 +277,7 @@ pub fn outcome_line(o: &Outcome, elsewhere: bool) -> Option<String> {
         }),
         Outcome::Told(t) => Some(format!("✓ your words — {t}{tail}")),
         Outcome::Withdrawn(r) => Some(format!("withdrawn: {r}")),
+        Outcome::Seen => Some(format!("✓ seen{tail}")),
         Outcome::Pending | Outcome::AskedBack(_) => None,
     }
 }
@@ -296,6 +314,7 @@ mod tests {
             mr: "https://gitlab.com/g/acme-backend/-/merge_requests/870".into(),
             mr_short: "backend!870".into(),
             source: "claude-code · acme-backend".into(),
+            kind: String::new(),
             question: "Push the fix & post?".into(),
             asked: "2026-10-21T11:00:00+03:00".into(),
             blocks: "reply".into(),

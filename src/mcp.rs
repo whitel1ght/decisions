@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::config::{Config, Mode};
-use crate::store::{New, Outcome, Store, is_key};
+use crate::store::{New, NewAnswer, Outcome, Store, is_key};
 
 const PROTOCOL: &str = "2025-06-18";
 const SUPPORTED: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const PING_EVERY: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(200);
 
-const ALWAYS: &str = "When you need a decision, approval or clarification from the user, call ask_user instead of asking in the chat. Keep working on anything that does not depend on the answer; when you need it, call wait_for_answer.";
+const ALWAYS: &str = "When you need a decision, approval or clarification from the user, call ask_user instead of asking in the chat. Keep working on anything that does not depend on the answer; when you need it, call wait_for_answer. When you answer a question the user asked while you were busy with other work, also file your answer with tell_user, so they find it in the same queue instead of scrolling back for it.";
 const ON_REQUEST: &str = "If the user asks you to send your questions to the decisions app, use ask_user for them from then on instead of asking in the chat.";
 
 struct Server<W: Write> {
@@ -71,6 +71,20 @@ fn tools() -> Value {
             "name": "withdraw",
             "description": "Withdraw a question you no longer need answered; it leaves the user's queue.",
             "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "reason": {"type": "string"}}, "required": ["id"]}
+        },
+        {
+            "name": "tell_user",
+            "description": "File your answer to a question the user asked you, as a card in their decisions app, so they find it with their other open items instead of scrolling back through the chat. Use it when the question came in while you were busy (mid-task, agents running) or the answer took a while. It does not wait; the user marks the card seen. Give the answer in the chat as well.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "The user's question, in a short line."},
+                    "answer": {"type": "string", "description": "Markdown: your answer, complete enough to read without the chat."},
+                    "link": {"type": "string", "description": "A URL the answer is about (e.g. the merge request)."},
+                    "ticket": {"type": "string", "description": "Ticket key, e.g. ABC-123."}
+                },
+                "required": ["question", "answer"]
+            }
         }
     ])
 }
@@ -88,6 +102,7 @@ fn outcome_result(id: &str, o: &Outcome) -> Value {
         Outcome::Told(text) => json!({"status": "answered_own_words", "id": id, "text": text}),
         Outcome::AskedBack(q) => json!({"status": "asked_back", "id": id, "question": q}),
         Outcome::Withdrawn(reason) => json!({"status": "withdrawn", "id": id, "reason": reason}),
+        Outcome::Seen => json!({"status": "seen", "id": id}),
     };
     let mut structured = structured;
     structured["message"] = json!(o.describe(id));
@@ -181,6 +196,12 @@ impl<W: Write> Server<W> {
                     json!({"status": "ok", "id": qid}),
                 ))
             }),
+            "tell_user" => self.tell_user(args).map(|qid| {
+                text_result(
+                    format!("filed as {qid} in the user's decisions app; they mark it seen"),
+                    json!({"status": "filed", "id": qid}),
+                )
+            }),
             other => Err(format!("unknown tool {other}")),
         };
         if self
@@ -232,6 +253,26 @@ impl<W: Write> Server<W> {
             return Ok(id);
         }
         self.store.add(new).map_err(|e| e.0)
+    }
+
+    fn tell_user(&self, a: &Value) -> Result<String, String> {
+        let question = str_arg(a, "question")?;
+        let answer = str_arg(a, "answer")?;
+        let ticket = a["ticket"].as_str().unwrap_or("").trim().to_string();
+        let (key, answer) = if ticket.is_empty() || is_key(&ticket.to_uppercase()) {
+            (ticket, answer)
+        } else {
+            (String::new(), format!("Ticket: {ticket}\n\n{answer}"))
+        };
+        self.store
+            .add_answer(NewAnswer {
+                key,
+                mr: a["link"].as_str().unwrap_or("").into(),
+                source: self.source(),
+                question,
+                answer,
+            })
+            .map_err(|e| e.0)
     }
 
     fn wait_for(
@@ -482,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_the_four_tools() {
+    fn tools_list_has_the_five_tools() {
         let (mut cl, _) = Client::start(&cfg(1, Mode::Always));
         let r = cl.call("tools/list", json!({}));
         let names: Vec<&str> = r["result"]["tools"]
@@ -491,7 +532,16 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["ask_user", "wait_for_answer", "reply", "withdraw"]);
+        assert_eq!(
+            names,
+            [
+                "ask_user",
+                "wait_for_answer",
+                "reply",
+                "withdraw",
+                "tell_user"
+            ]
+        );
         assert_eq!(
             r["result"]["tools"][0]["inputSchema"]["required"],
             json!(["question", "options"])
@@ -745,6 +795,45 @@ mod tests {
             text(&r).starts_with("the user asked back: which run?"),
             "{}",
             text(&r)
+        );
+    }
+
+    #[test]
+    fn tell_user_files_an_answer_card_and_returns_at_once() {
+        let c = cfg(0, Mode::Always);
+        let (mut cl, _) = Client::start(&c);
+        let t = Instant::now();
+        let r = cl.tool(
+            "tell_user",
+            json!({"question": "Why is CI red?", "answer": "A flaky **e2e** test.", "ticket": "ACME-9"}),
+        );
+        assert!(t.elapsed() < Duration::from_secs(2), "does not wait");
+        assert_eq!(r["structuredContent"]["status"], "filed");
+        assert_eq!(r["structuredContent"]["id"], "D-1");
+        assert!(text(&r).contains("D-1"), "{}", text(&r));
+        let d = &c.store().list().0[0];
+        assert_eq!(
+            (d.kind.as_str(), d.key.as_str(), d.source.as_str()),
+            ("answer", "ACME-9", "test-client · repo")
+        );
+        assert!(d.context.contains("flaky **e2e**"));
+        let bad = cl.tool("tell_user", json!({"question": "Q?"}));
+        assert_eq!(bad["isError"], true);
+        assert!(text(&bad).contains("`answer` is required"));
+    }
+
+    #[test]
+    fn the_instructions_ask_for_answers_given_while_busy() {
+        let (mut cl, _) = Client::start(&cfg(1, Mode::Always));
+        let r = cl.call(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "clientInfo": {"name": "x"}}),
+        );
+        assert!(
+            r["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("tell_user")
         );
     }
 
