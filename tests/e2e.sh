@@ -61,6 +61,12 @@ drive a "which one?" $'\r' q >/dev/null
 assert_contains "$(inbox)" "D-1: the user asks: which one?" "ask back reaches the session"
 assert_eq 2 "$("$BIN" count)" "asking leaves the decision open"
 
+fresh followup empty
+echo "A flaky test." | "$BIN" note --question "Why is CI red?" >/dev/null
+drive a "on main too?" $'\r' q >/dev/null
+assert_contains "$(inbox)" "D-1: the user asks: on main too?" "a follow-up on an answer card reaches the session"
+assert_contains "$("$BIN" list --json)" '"followup": "on main too?"' "the answer card stays open with the follow-up"
+
 fresh quit
 drive 1 q >/dev/null
 assert_contains "$(inbox)" "D-1 answered: 1 — Yes" "quitting sends the pending answer"

@@ -44,6 +44,7 @@ const KEYS: &[(&str, &str)] = &[
     ("n", "note on the card, or on the last answer"),
     ("last row", "something else: tell the agent in your words"),
     ("a", "ask the session back"),
+    ("a on ✉", "follow up on the answer"),
     ("s", "skip to the end of the stack"),
     ("o", "open the link (MR, PR, ticket)"),
     ("r", "reload"),
@@ -159,10 +160,11 @@ fn header(s: &State) -> String {
 
 fn footer(s: &State) -> String {
     let keys = match (&s.input, s.help, s.side, &s.pending) {
-        (Some(i), ..) => match i.kind {
+        (Some(i), ..) => match &i.kind {
             InputKind::Note => "⏎ send with note · esc no note",
             InputKind::CardNote { .. } => "⏎ attach the note (empty removes it) · esc cancel",
             InputKind::Tell { .. } => "⏎ answer in your own words · esc cancel",
+            InputKind::Ask { id } if s.is_answer_card(id) => "⏎ send the follow-up · esc cancel",
             InputKind::Ask { .. } => "⏎ ask · esc cancel",
         },
         (None, true, ..) => "any key closes help",
@@ -171,7 +173,7 @@ fn footer(s: &State) -> String {
         }
         (None, false, Side::Front, Some(_)) => "u undo · n note · J/K cards · 1-9 answer · ? help",
         (None, false, Side::Front, None) if s.current().is_some_and(|d| d.is_answer()) => {
-            "J/K cards · ⏎ got it · space full answer · ? help"
+            "J/K cards · ⏎ got it · a follow up · space full answer · ? help"
         }
         (None, false, Side::Front, None) => {
             "J/K cards · j/k options · 1-9 answer · ⏎ pick · space flip · ? help"
@@ -288,9 +290,10 @@ fn card_block(color: Color) -> Block<'static> {
         .style(Style::new().bg(theme::BG))
 }
 
-fn input_label(kind: &InputKind) -> String {
+fn input_label(s: &State, kind: &InputKind) -> String {
     match kind {
         InputKind::Note => "note".into(),
+        InputKind::Ask { id } if s.is_answer_card(id) => format!("follow up {id}"),
         InputKind::Ask { id } => format!("ask {id}"),
         InputKind::CardNote { id } => format!("note for {id}"),
         InputKind::Tell { id } => format!("tell {id}"),
@@ -342,7 +345,7 @@ fn input_box(f: &mut Frame, s: &State, rect: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme::LAVENDER))
         .title(Span::styled(
-            format!(" {} ", input_label(&i.kind)),
+            format!(" {} ", input_label(s, &i.kind)),
             Style::new()
                 .fg(theme::LAVENDER)
                 .add_modifier(Modifier::BOLD),
@@ -383,7 +386,7 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
         ));
     }
     title.push(Span::raw(" "));
-    if d.question_back {
+    if d.question_back && !d.is_answer() {
         title.push(Span::styled(
             "↩ reply ",
             Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
@@ -486,6 +489,13 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
         ));
         lines.push(Line::default());
     }
+    if let Some(af) = s.ask_failed.get(&d.id) {
+        lines.push(Line::styled(
+            format!("ask failed: {} · a retries", af.error),
+            Style::new().fg(theme::RED),
+        ));
+        lines.push(Line::default());
+    }
     let mut tail = vec![
         Line::default(),
         Line::styled(
@@ -496,6 +506,23 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
     let (body, field) = split_input(s, block.inner(rect));
     let room = usize::from(body.height).saturating_sub(lines.len() + tail.len());
     let mut answer = markdown::render(&d.context, body.width);
+    let mut thread = thread(d, body.width);
+    // The answer gives way first, down to a line and its cut note; then the oldest replies.
+    let fit = room.saturating_sub(answer.len().min(2) + 1);
+    if thread.len() > fit {
+        let keep = fit.saturating_sub(1);
+        thread.drain(..thread.len() - keep);
+        if fit > 0 {
+            thread.insert(
+                0,
+                Line::styled("… earlier on the back", Style::new().fg(theme::MUTED)),
+            );
+        }
+    }
+    if !thread.is_empty() {
+        thread.insert(0, Line::default());
+    }
+    let room = room.saturating_sub(thread.len());
     if answer.len() > room {
         answer.truncate(room.saturating_sub(1));
         answer.push(Line::styled(
@@ -504,10 +531,44 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
         ));
     }
     lines.extend(answer);
+    lines.append(&mut thread);
     lines.append(&mut tail);
     f.render_widget(block, rect);
     f.render_widget(Paragraph::new(lines), body);
     input_box(f, s, field);
+}
+
+/// An answer card's follow-ups and the session's replies, each led by who wrote it, then a
+/// waiting line while the last one is yours.
+fn thread(d: &Decision, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for e in &d.discussion {
+        let label = format!("{}: ", e.who);
+        let indent = label.chars().count();
+        let mut text = markdown::render(&e.text, width.saturating_sub(indent as u16));
+        if text.is_empty() {
+            text.push(Line::default());
+        }
+        for (i, mut line) in text.into_iter().enumerate() {
+            let head = if i == 0 {
+                Span::styled(
+                    label.clone(),
+                    Style::new().fg(theme::BLUE).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw(" ".repeat(indent))
+            };
+            line.spans.insert(0, head);
+            lines.push(line);
+        }
+    }
+    if d.discussion.last().is_some_and(|e| e.who == "you") {
+        lines.push(Line::styled(
+            "⧗ waiting for the session's reply",
+            Style::new().fg(theme::MUTED),
+        ));
+    }
+    lines
 }
 
 /// Draws the back; returns how far it can scroll.
@@ -924,7 +985,7 @@ mod tests {
             text: "more".into(),
         });
         let (buf, d) = render(&s, 80, 24);
-        let (_, y) = input_box_in(&buf, d.areas.card, "ask D-5");
+        let (_, y) = input_box_in(&buf, d.areas.card, "follow up D-5");
         let (_, cut) = find(&buf, "… space: the full answer");
         let (_, got) = find(&buf, "⏎  Got it");
         assert!(cut < got && got < y, "{}", screen(&buf));
@@ -964,7 +1025,9 @@ mod tests {
         s.help = true;
         let all = screen(&render(&s, 80, 24).0);
         assert!(
-            all.contains("undo the last answer") && all.contains("ask the session back"),
+            all.contains("undo the last answer")
+                && all.contains("ask the session back")
+                && all.contains("a on ✉   follow up on the answer"),
             "{all}"
         );
     }
@@ -1130,6 +1193,7 @@ mod tests {
         d.recommended = None;
         d.question = "Why is CI red?".into();
         d.context = "A **flaky** e2e test.\n\nIt passed on the retry.".into();
+        d.discussion.clear();
         d
     }
 
@@ -1143,7 +1207,7 @@ mod tests {
             "A flaky e2e test.",
             "It passed on the retry.",
             "⏎  Got it",
-            "J/K cards · ⏎ got it · space full answer · ? help",
+            "J/K cards · ⏎ got it · a follow up · space full answer · ? help",
         ] {
             assert!(all.contains(want), "{want:?} missing:\n{all}");
         }
@@ -1172,5 +1236,94 @@ mod tests {
             all.contains("decisions · 2 waiting · 1 answer · oldest 13m"),
             "{all}"
         );
+    }
+
+    fn said(who: &str, text: &str) -> crate::queue::Entry {
+        crate::queue::Entry {
+            at: "11:04".into(),
+            who: who.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn an_answer_card_shows_its_thread_under_the_answer() {
+        let mut d = answer_card();
+        d.discussion = vec![
+            said("you", "Is it flaky on main too?"),
+            said("session", "Yes, twice this week."),
+        ];
+        let buf = render(&state(vec![d.clone()], T0), 80, 24).0;
+        let (_, answer) = find(&buf, "It passed on the retry.");
+        let (x, you) = find(&buf, "you: Is it flaky on main too?");
+        let (_, session) = find(&buf, "session: Yes, twice this week.");
+        let (_, got) = find(&buf, "⏎  Got it");
+        assert!(answer < you && you < session && session < got);
+        assert_eq!(buf[(x, you)].fg, theme::BLUE);
+        let all = screen(&buf);
+        assert!(!all.contains("waiting for the session"), "{all}");
+
+        d.discussion.push(said("you", "Can we quarantine it?"));
+        d.question_back = true;
+        let all = screen(&render(&state(vec![d], T0), 80, 24).0);
+        assert!(all.contains("you: Can we quarantine it?"), "{all}");
+        assert!(all.contains("⧗ waiting for the session's reply"), "{all}");
+        assert!(
+            !all.contains("↩ reply"),
+            "the waiting line covers it:\n{all}"
+        );
+    }
+
+    #[test]
+    fn a_long_answer_gives_way_to_the_newest_of_the_thread() {
+        let mut d = answer_card();
+        d.context = (1..=40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        d.discussion = (1..=16)
+            .map(|i| {
+                said(
+                    if i % 2 == 1 { "you" } else { "session" },
+                    &format!("entry {i}"),
+                )
+            })
+            .collect();
+        let buf = render(&state(vec![d], T0), 80, 24).0;
+        let all = screen(&buf);
+        let (_, cut) = find(&buf, "… space: the full answer");
+        let (_, earlier) = find(&buf, "… earlier on the back");
+        let (_, newest) = find(&buf, "session: entry 16");
+        let (_, got) = find(&buf, "⏎  Got it");
+        assert!(cut < earlier && earlier < newest && newest < got, "{all}");
+        assert!(all.contains("line 1 "), "{all}");
+        assert!(!all.contains("entry 1 "), "{all}");
+    }
+
+    #[test]
+    fn the_follow_up_box_names_the_card_and_the_footer_says_send() {
+        let mut s = state(vec![answer_card()], T0);
+        app::update(&mut s, Event::Key(Key::Char('a')), T0);
+        typed(&mut s, "and on main?");
+        let (buf, d) = render(&s, 80, 24);
+        input_box_in(&buf, d.areas.card, "follow up D-5");
+        let all = screen(&buf);
+        assert!(all.contains("and on main?▏"), "{all}");
+        assert!(all.contains("⏎ send the follow-up · esc cancel"), "{all}");
+        assert!(all.contains("⏎  Got it"), "{all}");
+    }
+
+    #[test]
+    fn a_failed_follow_up_shows_on_the_answer_card() {
+        let mut s = state(vec![answer_card()], T0);
+        s.ask_failed.insert(
+            "D-5".into(),
+            app::AskFailed {
+                text: "and on main?".into(),
+                error: "boom".into(),
+            },
+        );
+        let all = screen(&render(&s, 80, 24).0);
+        assert!(all.contains("ask failed: boom · a retries"), "{all}");
     }
 }

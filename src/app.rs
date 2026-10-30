@@ -201,6 +201,11 @@ impl State {
         self.queue.get(self.cur)
     }
 
+    /// `id` is an answer card in the queue: an ask on it is a follow-up.
+    pub fn is_answer_card(&self, id: &str) -> bool {
+        self.queue.iter().any(|d| d.id == id && d.is_answer())
+    }
+
     pub fn age_ms(&self, d: &Decision) -> i64 {
         d.asked_ms().map_or(0, |at| (self.now - at).max(0))
     }
@@ -459,13 +464,13 @@ fn to_front(s: &mut State, id: &str) {
     }
 }
 
-/// On an answer card the only action is ⏎ (seen); other answering keys say so.
+/// On an answer card the actions are ⏎ (seen) and a (follow up); other answering keys say so.
 fn answer_card_hint(s: &mut State) -> bool {
     let Some(id) = s.current().filter(|d| d.is_answer()).map(|d| d.id.clone()) else {
         return false;
     };
     s.toast(format!(
-        "{id} is an answer to your question: ⏎ marks it seen"
+        "{id} is an answer to your question: ⏎ got it · a follow up"
     ));
     true
 }
@@ -598,10 +603,8 @@ fn note(s: &mut State) {
     }
 }
 
+/// a: ask the session back, or on an answer card, follow up on its answer.
 fn ask(s: &mut State) {
-    if answer_card_hint(s) {
-        return;
-    }
     if let Some(id) = s.current().map(|d| d.id.clone()) {
         let text = s
             .ask_failed
@@ -673,7 +676,11 @@ fn input_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
                             text: text.clone(),
                         });
                         s.asking.insert(id.clone(), text);
-                        s.toast(format!("asking {id}…"));
+                        s.toast(if s.is_answer_card(&id) {
+                            format!("following up on {id}…")
+                        } else {
+                            format!("asking {id}…")
+                        });
                     }
                 }
             }
@@ -694,7 +701,12 @@ fn sent(
         match result {
             Ok(warning) => {
                 s.ask_failed.remove(&id);
-                s.toast(warning.unwrap_or_else(|| format!("asked {id}")));
+                let done = if s.is_answer_card(&id) {
+                    format!("follow-up on {id} sent to the session")
+                } else {
+                    format!("asked {id}")
+                };
+                s.toast(warning.unwrap_or(done));
             }
             Err(error) => {
                 s.ask_failed.insert(id.clone(), AskFailed { text, error });
@@ -1071,19 +1083,67 @@ mod tests {
     }
 
     #[test]
-    fn numbers_ask_back_and_notes_do_nothing_on_an_answer_card() {
+    fn numbers_and_notes_only_hint_on_an_answer_card() {
         let mut s = loaded(vec![answer_card("D-5")]);
-        for k in [
-            Key::Char('1'),
-            Key::Char('2'),
-            Key::Char('a'),
-            Key::Char('n'),
-        ] {
+        for k in [Key::Char('1'), Key::Char('2'), Key::Char('n')] {
             assert!(press(&mut s, k).is_empty(), "{k:?}");
             assert!(s.input.is_none(), "{k:?} opened an input");
             assert!(s.pending.is_none(), "{k:?} threw the card");
         }
-        assert!(s.toast.as_ref().unwrap().0.contains("⏎"), "{:?}", s.toast);
+        assert_eq!(
+            s.toast.as_ref().unwrap().0,
+            "D-5 is an answer to your question: ⏎ got it · a follow up"
+        );
+    }
+
+    #[test]
+    fn a_follows_up_on_an_answer_card_and_the_card_stays() {
+        let mut s = loaded(vec![answer_card("D-5"), fixture()[0].clone()]);
+        press(&mut s, Key::Char('a'));
+        assert_eq!(
+            s.input.as_ref().unwrap().kind,
+            InputKind::Ask { id: "D-5".into() }
+        );
+        type_text(&mut s, "is it flaky on main too?");
+        assert_eq!(
+            press(&mut s, Key::Enter),
+            [Command::Ask {
+                id: "D-5".into(),
+                text: "is it flaky on main too?".into()
+            }]
+        );
+        assert_eq!(s.toast.as_ref().unwrap().0, "following up on D-5…");
+        assert!(s.pending.is_none(), "a follow-up does not mark it seen");
+        update(&mut s, sent("D-5", true, Ok(())), T0);
+        assert_eq!(
+            s.toast.as_ref().unwrap().0,
+            "follow-up on D-5 sent to the session"
+        );
+        assert_eq!(ids(&s), ["D-5", "D-1"]);
+        let mut after = answer_card("D-5");
+        after.discussion = vec![crate::queue::Entry {
+            at: String::new(),
+            who: "you".into(),
+            text: "is it flaky on main too?".into(),
+        }];
+        update(
+            &mut s,
+            Event::Loaded(Ok(vec![after, fixture()[0].clone()])),
+            T0,
+        );
+        assert_eq!(s.current().unwrap().discussion[0].who, "you");
+    }
+
+    #[test]
+    fn a_failed_follow_up_keeps_its_text_for_the_retry() {
+        let mut s = loaded(vec![answer_card("D-5")]);
+        press(&mut s, Key::Char('a'));
+        type_text(&mut s, "and on main?");
+        press(&mut s, Key::Enter);
+        update(&mut s, sent("D-5", true, Err("disk full")), T0);
+        assert_eq!(s.ask_failed["D-5"].error, "disk full");
+        press(&mut s, Key::Char('a'));
+        assert_eq!(s.input.as_ref().unwrap().text, "and on main?");
     }
 
     #[test]
