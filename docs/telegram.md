@@ -163,6 +163,9 @@ Reply: text = own words · "2 text" = option 2 with a note · "? text" = ask bac
   text.
 - **Buttons:** one row per option, `1 · Push and post ★` (★ on the recommended one). Callback data
   is `a:D-7:2`, and `u:D-7` for undo.
+- **Answer cards** (`kind: answer`): the header starts with ✉ and says "answered 3m ago", the
+  question reads "you asked: …", the answer is the context, and the hint line is "✓ Got it, or
+  reply with text to follow up". One `✓ Got it` button, callback data `s:D-7`.
 
 ## Answering
 
@@ -178,11 +181,15 @@ Reply: text = own words · "2 text" = option 2 with a note · "? text" = ask bac
   3. Anything else non-empty: an own-words answer (`store.tell`).
 
   A number outside the card's options is read as own words.
+- **Reply to an answer card with text:** a follow-up (`store.ask`; a leading `?` is dropped),
+  saved at once, the card stays open, and the bot answers "Sent to the session: it will reply on
+  D-7." The session's reply comes back threaded under the card like any session reply (see Edits).
+  Empty text gets how to close or follow up. `✓ Got it` marks the card seen (`store.seen`, no hook).
 - **Text that replies to nothing:** when exactly one sent card is not `done`, it goes to that card;
   otherwise the bot answers "Reply to the card you mean." Text replying to a done card gets
   "D-7 is already answered."
-- **Every answer and ask-back runs the `on_answer` hook** with the same JSON as the CLI. A hook
-  failure keeps the answer and is reported in a reply: "⚠ hook failed: …".
+- **Every answer, ask-back and follow-up runs the `on_answer` hook** with the same JSON as the
+  CLI. A hook failure keeps the answer and is reported in a reply: "⚠ hook failed: …".
 - **A race with the deck** (the store refuses because the card is already answered): the message
   shows the stored answer with "(in the deck)", and the pending entry is dropped.
 

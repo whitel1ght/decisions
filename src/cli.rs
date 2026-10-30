@@ -189,6 +189,7 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
                 source,
                 question,
                 answer,
+                session: String::new(),
             }) {
                 Ok(id) => {
                     println!("{id}");

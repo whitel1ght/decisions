@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 
 use crate::queue::{Decision, Entry, Opt};
 
-const FIELDS: [&str; 9] = [
-    "id", "day", "key", "mr", "asked", "blocks", "status", "source", "kind",
+const FIELDS: [&str; 10] = [
+    "id", "day", "key", "mr", "asked", "blocks", "status", "source", "kind", "session",
 ];
 /// `kind` of a card that reports an answer to the user's question; questions have none.
 pub const ANSWER: &str = "answer";
@@ -134,6 +134,21 @@ impl Doc {
         self.require_open(id)
     }
 
+    /// The user's follow-ups waiting on an answer card (every entry since the session's last
+    /// reply, one per paragraph), or "".
+    fn followup(&self) -> String {
+        if !self.is_answer() {
+            return String::new();
+        }
+        let entries = discussion(self.section("Discussion"));
+        let waiting = entries.iter().rev().take_while(|e| e.who == "you").count();
+        entries[entries.len() - waiting..]
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     fn require_open(&self, id: &str) -> Result<()> {
         match self.get("status") {
             "open" => Ok(()),
@@ -186,7 +201,7 @@ fn parse(text: &str) -> Result<Doc> {
 fn render(doc: &Doc) -> String {
     let mut out = String::from("---\n");
     for k in FIELDS {
-        if matches!(k, "source" | "kind") && doc.get(k).is_empty() {
+        if matches!(k, "source" | "kind" | "session") && doc.get(k).is_empty() {
             continue;
         }
         out.push_str(&format!("{k}: {}\n", scalar(doc.get(k))));
@@ -341,6 +356,8 @@ pub struct NewAnswer {
     pub source: String,
     pub question: String,
     pub answer: String,
+    /// The writer's session id, so a follow-up on the card can reach it; may be empty.
+    pub session: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -349,6 +366,8 @@ pub struct Event {
     pub id: String,
     pub key: String,
     pub source: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub session: String,
     pub option: Option<u8>,
     pub note: Option<String>,
     pub text: String,
@@ -524,6 +543,9 @@ impl Store {
                 .map(|d| {
                     let mut v = serde_json::to_value(self.summary(d)).expect("json");
                     v["age"] = json!(age(d.get("asked")));
+                    v["session"] = json!(d.get("session"));
+                    v["discussion_count"] = json!(discussion(d.section("Discussion")).len());
+                    v["followup"] = json!(d.followup());
                     v
                 })
                 .collect(),
@@ -634,6 +656,12 @@ impl Store {
         Ok(discussion(doc.section("Discussion")).len())
     }
 
+    pub fn is_answer_card(&self, id: &str) -> bool {
+        self.find_file(id)
+            .and_then(|p| parse(&fs::read_to_string(p).map_err(io)?))
+            .is_ok_and(|d| d.is_answer())
+    }
+
     fn find_file(&self, id: &str) -> Result<PathBuf> {
         if !is_id(id) {
             return fail(format!("not a decision id: {id}"));
@@ -726,11 +754,17 @@ impl Store {
         if let Some(mut doc) = self.open_docs().0.into_iter().find(|d| {
             d.is_answer()
                 && d.get("source") == source
+                && (n.session.trim().is_empty()
+                    || d.get("session").is_empty()
+                    || d.get("session") == one_line(&n.session))
                 && one_line(d.section("Question")) == question
         }) {
             let id = doc.get("id").to_string();
             doc.set_section("Context", answer);
             doc.set("asked", iso(now()));
+            if !n.session.trim().is_empty() {
+                doc.set("session", one_line(&n.session));
+            }
             write_atomic(&self.dir.join(format!("{id}.md")), &render(&doc))?;
             return Ok(id);
         }
@@ -744,6 +778,7 @@ impl Store {
         doc.set("status", "open");
         doc.set("source", source);
         doc.set("kind", ANSWER);
+        doc.set("session", one_line(&n.session));
         doc.set_section("Question", question);
         doc.set_section("Context", answer);
         write_atomic(&self.dir.join(format!("{id}.md")), &render(&doc))?;
@@ -789,6 +824,7 @@ impl Store {
             id: doc.get("id").into(),
             key: doc.get("key").into(),
             source: doc.get("source").into(),
+            session: doc.get("session").into(),
             option,
             note,
             text,
@@ -849,10 +885,11 @@ impl Store {
         ))
     }
 
+    /// A question back on a question card, or a follow-up on an open answer card.
     pub fn ask(&self, id: &str, text: &str) -> Result<Event> {
         let _lock = self.lock()?;
         let (p, mut doc) = self.load(id)?;
-        doc.require_question(id)?;
+        doc.require_open(id)?;
         doc.discuss("you", text)?;
         write_atomic(&p, &render(&doc))?;
         Ok(Self::event(
@@ -1453,7 +1490,6 @@ mod tests {
             "an answer card has no options"
         );
         assert!(s.tell(&id, "x").is_err());
-        assert!(s.ask(&id, "x").is_err());
         assert!(s.seen("D-1").is_err(), "a question is answered, not seen");
         assert_eq!(s.outcome(&id).unwrap(), Outcome::Pending);
         let dest = s.seen(&id).unwrap();
@@ -1462,6 +1498,89 @@ mod tests {
         assert_eq!(s.outcome(&id).unwrap(), Outcome::Seen);
         assert!(s.seen(&id).is_err(), "seen twice");
         assert_eq!(s.list().0.len(), 1);
+    }
+
+    #[test]
+    fn an_open_answer_card_takes_follow_ups_and_lists_them() {
+        let s = store();
+        let mut n = answer_card("pi · repo", "Done?", "Yes.");
+        n.session = "abc-123".into();
+        let id = s.add_answer(n).unwrap();
+        assert!(s.show(&id).unwrap().contains("session: abc-123"));
+        let json = s.list_json();
+        assert_eq!(
+            (
+                &json[0]["session"],
+                &json[0]["discussion_count"],
+                &json[0]["followup"]
+            ),
+            (&json!("abc-123"), &json!(0), &json!(""))
+        );
+        let e = s.ask(&id, "and the tests?").unwrap();
+        assert_eq!((e.event, e.session.as_str()), ("asked", "abc-123"));
+        assert_eq!(serde_json::to_value(&e).unwrap()["session"], "abc-123");
+        assert!(s.show(&id).unwrap().contains("you: and the tests?"));
+        let json = s.list_json();
+        assert_eq!(
+            (&json[0]["discussion_count"], &json[0]["followup"]),
+            (&json!(1), &json!("and the tests?"))
+        );
+        s.reply(&id, "green").unwrap();
+        let json = s.list_json();
+        assert_eq!(
+            (&json[0]["discussion_count"], &json[0]["followup"]),
+            (&json!(2), &json!(""))
+        );
+        s.seen(&id).unwrap();
+        assert!(s.ask(&id, "more?").is_err(), "a seen card takes none");
+    }
+
+    #[test]
+    fn follow_ups_since_the_last_reply_all_wait() {
+        let s = store();
+        let id = s
+            .add_answer(answer_card("pi · repo", "Done?", "Yes."))
+            .unwrap();
+        s.ask(&id, "A").unwrap();
+        s.reply(&id, "ok").unwrap();
+        s.ask(&id, "B").unwrap();
+        s.ask(&id, "C").unwrap();
+        let json = s.list_json();
+        assert_eq!(
+            (&json[0]["discussion_count"], &json[0]["followup"]),
+            (&json!(4), &json!("B\n\nC"))
+        );
+    }
+
+    #[test]
+    fn two_sessions_asking_the_same_get_their_own_cards() {
+        let s = store();
+        let mut a = answer_card("claude-code · repo", "Done?", "Yes.");
+        a.session = "one".into();
+        let mut b = answer_card("claude-code · repo", "Done?", "No.");
+        b.session = "two".into();
+        let (ida, idb) = (s.add_answer(a).unwrap(), s.add_answer(b).unwrap());
+        assert_ne!(ida, idb);
+        assert!(s.show(&ida).unwrap().contains("session: one"));
+    }
+
+    #[test]
+    fn a_question_back_is_not_a_follow_up_and_has_no_session() {
+        let s = store();
+        first(&s);
+        let e = s.ask("D-1", "why?").unwrap();
+        assert!(serde_json::to_value(&e).unwrap().get("session").is_none());
+        let json = s.list_json();
+        assert_eq!(
+            (
+                &json[0]["session"],
+                &json[0]["discussion_count"],
+                &json[0]["followup"]
+            ),
+            (&json!(""), &json!(1), &json!(""))
+        );
+        s.add_answer(answer_card("x", "q", "a")).unwrap();
+        assert!(!s.show("D-2").unwrap().contains("session:"));
     }
 
     #[test]

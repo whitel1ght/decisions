@@ -183,10 +183,17 @@ impl Demo {
             None,
             "You asked this while the session was busy with a review. **A flaky e2e test**: \
              `RetrieveV2ItemSpec` timed out once and passed on the retry.\n\n\
-             An answer card has no options: ⏎ marks it seen.",
+             An answer card has no options: ⏎ marks it seen, a follows up.",
         );
         answer.kind = "answer".into();
         answer.source = "claude-code · acme-backend".into();
+        answer.discussion = vec![
+            entry("you", "Is it flaky on main too?"),
+            entry(
+                "session",
+                "Yes, twice this week; ACME-1010 tracks quarantining it.",
+            ),
+        ];
         Self {
             state: Mutex::new(DemoState {
                 open: vec![
@@ -454,6 +461,11 @@ mod tests {
         assert!(
             list.iter().any(|d| !d.discussion.is_empty()),
             "a discussion"
+        );
+        assert!(
+            list.iter()
+                .any(|d| d.is_answer() && d.discussion.len() >= 2),
+            "an answer card with a thread"
         );
         assert!(
             list.iter().any(|d| d.context.lines().count() > 30),

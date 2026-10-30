@@ -23,6 +23,7 @@ Tap an option to answer (10 s to undo), or reply to a card:
   text: answer in your own words
   2 text: option 2, with the text as a note
   ? text: ask the agent a question back
+On an answer (✉): ✓ Got it, or reply with text to follow up.
 /on · /off · /status · /help";
 
 pub struct Bot<A: Api> {
@@ -432,12 +433,24 @@ impl<A: Api> Bot<A> {
             return self.close_card(chat, &id, true);
         };
         if d.is_answer() {
-            self.say(
-                chat,
-                &format!("{id} is an answer to your question: tap ✓ Got it once you've read it."),
-                Some(mid),
-            )?;
-            return Ok(());
+            // Any text follows up; "? text" reads the same.
+            return match reply::parse(text, &[]) {
+                Reply::Ask(t) | Reply::Tell(t) => self.ask(
+                    chat,
+                    mid,
+                    &id,
+                    &t,
+                    &format!("Sent to the session: it will reply on {id}."),
+                ),
+                _ => {
+                    let hint = format!(
+                        "{id} is an answer to your question: {}.",
+                        render::ANSWER_HINT
+                    );
+                    self.say(chat, &hint, Some(mid))?;
+                    Ok(())
+                }
+            };
         }
         let options: Vec<u8> = d.options.iter().map(|o| o.n).collect();
         match reply::parse(text, &options) {
@@ -445,23 +458,7 @@ impl<A: Api> Bot<A> {
                 self.say(chat, HELP, Some(mid))?;
                 Ok(())
             }
-            Reply::Ask(q) => {
-                match self.store.ask(&id, &q) {
-                    // Asked: a failed hook warning or confirmation must not ask twice.
-                    Ok(event) => {
-                        if let Err(e) = self.run_hook(chat, &id, &event) {
-                            self.note(&e);
-                        }
-                        if let Err(e) = self.say(chat, &format!("Asked: {q}"), Some(mid)) {
-                            self.note(&e);
-                        }
-                    }
-                    Err(e) => {
-                        self.say(chat, &e.0, Some(mid))?;
-                    }
-                }
-                Ok(())
-            }
+            Reply::Ask(q) => self.ask(chat, mid, &id, &q, &format!("Asked: {q}")),
             Reply::Answer { n, note } => {
                 self.update(|s| {
                     s.pending.remove(&id);
@@ -477,6 +474,25 @@ impl<A: Api> Bot<A> {
                 self.finish(chat, &id, r)
             }
         }
+    }
+
+    /// An ask-back, or a follow-up on an answer card: saved at once, the hook, then `done` said.
+    fn ask(&mut self, chat: i64, mid: i64, id: &str, q: &str, done: &str) -> Result<(), ApiError> {
+        match self.store.ask(id, q) {
+            // Asked: a failed hook warning or confirmation must not ask twice.
+            Ok(event) => {
+                if let Err(e) = self.run_hook(chat, id, &event) {
+                    self.note(&e);
+                }
+                if let Err(e) = self.say(chat, done, Some(mid)) {
+                    self.note(&e);
+                }
+            }
+            Err(e) => {
+                self.say(chat, &e.0, Some(mid))?;
+            }
+        }
+        Ok(())
     }
 
     fn press(&mut self, chat: i64, qid: &str, data: &str) -> Result<(), ApiError> {
@@ -778,14 +794,71 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_to_an_answer_card_says_how_to_close_it() {
+    fn a_text_reply_to_an_answer_card_follows_up_and_the_session_replies_under_it() {
         let mut t = setup(LOG);
         let id = add_answer(&t);
         t.bot.turn().unwrap();
-        t.bot.handle(&msg(1, "thanks", Some(100))).unwrap();
+        t.bot.handle(&msg(1, "which test?", Some(100))).unwrap();
+        assert_eq!(
+            t.bot.store.outcome(&id).unwrap(),
+            Outcome::AskedBack("which test?".into())
+        );
+        assert!(events(&t).contains("\"event\":\"asked\""));
+        let said = t.bot.api.sent.last().unwrap();
+        assert_eq!(
+            said.text,
+            format!("Sent to the session: it will reply on {id}.")
+        );
+        assert_eq!(said.reply_to, Some(1001));
+        assert!(
+            !st(&t).messages[&id].done,
+            "a follow-up keeps the card open"
+        );
+        t.bot.store.reply(&id, "checkout_spec").unwrap();
+        t.bot.turn().unwrap();
+        t.bot.turn().unwrap();
+        let replies: Vec<&Out> = t
+            .bot
+            .api
+            .sent
+            .iter()
+            .filter(|o| o.reply_to == Some(100))
+            .collect();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].text, "session: checkout_spec");
+        let thread = replies[0].message_id;
+        t.bot.handle(&msg(2, "? and why", Some(thread))).unwrap();
+        assert_eq!(
+            t.bot.store.outcome(&id).unwrap(),
+            Outcome::AskedBack("and why".into())
+        );
+    }
+
+    #[test]
+    fn an_empty_reply_to_an_answer_card_says_how_to_close_it() {
+        let mut t = setup(LOG);
+        let id = add_answer(&t);
+        t.bot.turn().unwrap();
+        t.bot.handle(&msg(1, "  ", Some(100))).unwrap();
         assert_eq!(t.bot.store.outcome(&id).unwrap(), Outcome::Pending);
         let said = t.bot.api.sent.last().unwrap();
         assert!(said.text.contains("Got it"), "{}", said.text);
+        assert!(said.text.contains("follow up"), "{}", said.text);
+        assert!(events(&t).is_empty());
+    }
+
+    #[test]
+    fn a_reply_to_a_seen_answer_card_is_already_answered() {
+        let mut t = setup(LOG);
+        let id = add_answer(&t);
+        t.bot.turn().unwrap();
+        t.bot.handle(&tap(1, 100, &format!("s:{id}"))).unwrap();
+        t.bot.handle(&msg(2, "one more thing", Some(100))).unwrap();
+        assert_eq!(t.bot.store.outcome(&id).unwrap(), Outcome::Seen);
+        assert_eq!(
+            t.bot.api.sent.last().unwrap().text,
+            format!("{id} is already answered.")
+        );
     }
 
     #[test]

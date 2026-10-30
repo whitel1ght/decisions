@@ -13,6 +13,7 @@ pub const LIMIT: usize = 4096;
 pub const CONTEXT_LIMIT: usize = 3000;
 pub const HINT: &str =
     "Reply: text = own words · \"2 text\" = option 2 with a note · \"? text\" = ask back";
+pub const ANSWER_HINT: &str = "✓ Got it, or reply with text to follow up";
 pub const CLOSED: &str = "closed";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,10 +205,8 @@ fn build(d: &Decision, now_ms: i64, ctx: Context, limit: usize) -> String {
             escape(label)
         ));
     }
-    if !d.is_answer() {
-        s.push('\n');
-        s.push_str(&escape(HINT));
-    }
+    s.push('\n');
+    s.push_str(&escape(if d.is_answer() { ANSWER_HINT } else { HINT }));
     s
 }
 
@@ -425,6 +424,15 @@ mod tests {
             "🔗 <a href=\"https://gitlab.com/g/acme-backend/-/merge_requests/870\">backend!870</a>"
         ));
         assert!(m.text.ends_with(&escape(HINT)));
+    }
+
+    #[test]
+    fn an_answer_card_says_how_to_follow_up() {
+        let mut x = d();
+        x.kind = "answer".into();
+        let m = card(&x, at("2026-10-21T11:03:00+03:00"), Context::Full);
+        assert!(m.text.ends_with(ANSWER_HINT), "{}", m.text);
+        assert!(!m.text.contains(&escape(HINT)), "{}", m.text);
     }
 
     #[test]

@@ -68,6 +68,7 @@ mod tests {
             id: "D-7".into(),
             key: "ACME-1".into(),
             source: "s".into(),
+            session: String::new(),
             option: Some(2),
             note: None,
             text: "D-7 answered: 2 — Push only.".into(),
