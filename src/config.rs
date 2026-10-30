@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::store::Store;
+use crate::theme::Icons;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -62,6 +63,7 @@ pub struct Config {
     pub mr_strip: String,
     pub title: String,
     pub badge: String,
+    pub icons: Icons,
     pub session: Option<String>,
     pub telegram: Telegram,
 }
@@ -74,6 +76,7 @@ struct FileConfig {
     mr_strip_prefix: Option<String>,
     title: Option<String>,
     badge: Option<String>,
+    icons: Option<String>,
     telegram: Option<FileTelegram>,
 }
 
@@ -127,6 +130,12 @@ pub fn load_from(env: &dyn Fn(&str) -> Option<String>) -> Result<Config, String>
         Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?,
         Err(_) => FileConfig::default(),
     };
+    let icons = Icons::named(
+        &env("DECISIONS_ICONS")
+            .filter(|v| !v.is_empty())
+            .or(file.icons)
+            .unwrap_or_default(),
+    );
     let mut c = Config {
         dir: xdg("XDG_STATE_HOME", ".local/state").join("decisions"),
         mode: match &file.mode {
@@ -143,7 +152,8 @@ pub fn load_from(env: &dyn Fn(&str) -> Option<String>) -> Result<Config, String>
         badge: file
             .badge
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "✋".into()),
+            .unwrap_or_else(|| icons.hand.into()),
+        icons,
         session: None,
         telegram: Telegram::default(),
     };
@@ -271,6 +281,35 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!((c.title.as_str(), c.badge.as_str()), ("filed", "F"));
+    }
+
+    #[test]
+    fn icons_default_then_file_then_environment_and_set_the_badge_default() {
+        use crate::theme::{NERD_ICONS, TEXT_ICONS};
+        let h = home();
+        let hv = h.to_str().unwrap();
+        let c = load_from(&with(&[("HOME", hv)])).unwrap();
+        assert_eq!((c.icons, c.badge.as_str()), (TEXT_ICONS, "✋"));
+        std::fs::create_dir_all(h.join(".config/decisions")).unwrap();
+        let file = |text: &str| std::fs::write(h.join(".config/decisions/config.toml"), text);
+        file("icons = \"nerd\"\n").unwrap();
+        let c = load_from(&with(&[("HOME", hv)])).unwrap();
+        assert_eq!((c.icons, c.badge.as_str()), (NERD_ICONS, "\u{f256}"));
+        let c = load_from(&with(&[("HOME", hv), ("DECISIONS_ICONS", "")])).unwrap();
+        assert_eq!(c.icons, NERD_ICONS, "empty falls through to the file");
+        let c = load_from(&with(&[("HOME", hv), ("DECISIONS_ICONS", "text")])).unwrap();
+        assert_eq!((c.icons, c.badge.as_str()), (TEXT_ICONS, "✋"));
+        let c = load_from(&with(&[("HOME", hv), ("DECISIONS_ICONS", "emoji")])).unwrap();
+        assert_eq!(c.icons, TEXT_ICONS, "unknown is the default, not an error");
+        file("icons = \"\"\n").unwrap();
+        let c = load_from(&with(&[("HOME", hv), ("DECISIONS_ICONS", "nerd")])).unwrap();
+        assert_eq!(c.icons, NERD_ICONS);
+        assert_eq!(load_from(&with(&[("HOME", hv)])).unwrap().icons, TEXT_ICONS);
+        file("icons = \"nerd\"\nbadge = \"F\"\n").unwrap();
+        let c = load_from(&with(&[("HOME", hv)])).unwrap();
+        assert_eq!((c.icons, c.badge.as_str()), (NERD_ICONS, "F"));
+        let c = load_from(&with(&[("HOME", hv), ("DECISIONS_BADGE", "🔧")])).unwrap();
+        assert_eq!(c.badge, "🔧");
     }
 
     #[test]

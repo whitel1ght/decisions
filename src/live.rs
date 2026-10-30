@@ -67,6 +67,7 @@ mod tests {
             mr_strip: String::new(),
             title: "decisions".into(),
             badge: "✋".into(),
+            icons: Default::default(),
             session: None,
             telegram: Default::default(),
         }

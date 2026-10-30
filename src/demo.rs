@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::queue::{Backend, Decision, Entry, Opt};
+use crate::theme::Icons;
 
 /// The card whose answer always fails (failed-send badge, retry, quit warning).
 pub const FAILS_ANSWER: &str = "D-3";
@@ -128,15 +129,18 @@ The branch stays as it is; the decision comes back tomorrow morning.
 Scroll with j/k, ctrl-d/ctrl-u, g and G; space or esc flips back.";
 
 impl Demo {
-    pub fn new() -> Self {
-        Self::with_clock(Box::new(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as i64)
-        }))
+    pub fn new(icons: Icons) -> Self {
+        Self::with_clock(
+            Box::new(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64)
+            }),
+            icons,
+        )
     }
 
-    pub fn with_clock(clock: Clock) -> Self {
+    pub fn with_clock(clock: Clock, icons: Icons) -> Self {
         let now = clock();
         let mut d1 = card(
             "D-1",
@@ -151,7 +155,10 @@ impl Demo {
                 "I'll answer myself",
             ],
             Some(1),
-            "The session asked you something back on this one (the green ↩ reply badge).\n\nDrafted reply:\n\n> The export keeps the column order you set; hidden columns stay out of the file.",
+            &format!(
+                "The session asked you something back on this one (the green {} reply badge).\n\nDrafted reply:\n\n> The export keeps the column order you set; hidden columns stay out of the file.",
+                icons.reply
+            ),
         );
         d1.question_back = true;
         let mut d2 = card(
@@ -219,7 +226,10 @@ impl Demo {
                         "Start ACME-1002 now, or after the review round?",
                         &["Start now", "After the review round", "Not today"],
                         None,
-                        "No ★ here: ⏎ does nothing until you move to an option with j/k.\n\nIn the demo, asking back (a) on this card fails, to show the failed-ask badge; a again offers your text for a retry.",
+                        &format!(
+                            "No {} here: ⏎ does nothing until you move to an option with j/k.\n\nIn the demo, asking back (a) on this card fails, to show the failed-ask badge; a again offers your text for a retry.",
+                            icons.star
+                        ),
                     ),
                     card(
                         "D-5",
@@ -340,7 +350,7 @@ impl Demo {
 
 impl Default for Demo {
     fn default() -> Self {
-        Self::new()
+        Self::new(Icons::default())
     }
 }
 
@@ -413,7 +423,10 @@ mod tests {
         let now = Arc::new(AtomicI64::new(T0));
         let clock = now.clone();
         (
-            Demo::with_clock(Box::new(move || clock.load(Ordering::Relaxed))),
+            Demo::with_clock(
+                Box::new(move || clock.load(Ordering::Relaxed)),
+                Icons::default(),
+            ),
             now,
         )
     }

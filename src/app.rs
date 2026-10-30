@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::queue::Decision;
+use crate::theme::Icons;
 
 pub const UNDO_MS: i64 = 5_000;
 pub const GHOST_MS: i64 = 200;
@@ -168,6 +169,7 @@ pub struct State {
     pub quit_failed: bool,
     pub demo: bool,
     pub title: String,
+    pub icons: Icons,
 }
 
 pub fn band(age_ms: i64) -> Band {

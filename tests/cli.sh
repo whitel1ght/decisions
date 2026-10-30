@@ -97,6 +97,10 @@ has "list marks it" "$(run list | grep "^$aid ")" " answer "
 check "list --json kind" "answer" "$(run list --json | jq -r --arg i "$aid" '.[] | select(.id==$i) | .kind')"
 check "count leaves answers out" "$before" "$(run count)"
 check "the badge shows them apart" "✋ $before ✉ 1" "$(run count --badge)"
+hand="$(printf '\357\211\226')" envelope="$(printf '\357\203\240')" # U+F256, U+F0E0
+check "nerd icons on the badge" "$hand $before $envelope 1" "$(DECISIONS_ICONS=nerd run count --badge)"
+check "a set badge wins over the nerd hand" "🔧 $before $envelope 1" "$(DECISIONS_ICONS=nerd DECISIONS_BADGE=🔧 run count --badge)"
+check "an unknown icon set is the text one" "✋ $before ✉ 1" "$(DECISIONS_ICONS=emoji run count --badge)"
 run answer "$aid" 1 >/dev/null; check "an answer card cannot be answered" "1" "$?"
 run note --question 'Empty?' </dev/null >/dev/null; check "a note needs an answer on stdin" "1" "$?"
 run seen "$aid" >/dev/null; check "seen exits 0" "0" "$?"
@@ -104,6 +108,7 @@ run seen "$aid" >/dev/null; check "seen exits 0" "0" "$?"
 check "wait on a seen one" "seen: the user has read $aid" "$("$BIN" wait "$aid")"
 run seen D-2 >/dev/null; check "a question cannot be seen" "1" "$?"
 check "no answers, no envelope" "✋ $before" "$(run count --badge)"
+check "nerd, no answers" "$hand $before" "$(DECISIONS_ICONS=nerd run count --badge)"
 
 echo "setup"
 for h in claude codex gemini opencode pi cursor generic; do

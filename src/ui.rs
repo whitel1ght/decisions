@@ -30,13 +30,14 @@ pub struct Drawn {
     pub scroll_max: u16,
 }
 
+/// The help rows; `{star}` and `{answer}` stand for the icons.
 const KEYS: &[(&str, &str)] = &[
     ("J / K", "next / previous card"),
     ("j / k", "move between the options (back: scroll)"),
     ("g / G", "first / last option (back: top / bottom)"),
     ("1-9", "answer with that option"),
-    ("⏎", "option under the cursor, else ★"),
-    ("⏎ on ✉", "an answer to your question: got it"),
+    ("⏎", "option under the cursor, else {star}"),
+    ("⏎ on {answer}", "an answer to your question: got it"),
     ("↑ / ↓", "same as j / k"),
     ("space", "flip: context and discussion"),
     ("^d / ^u", "page the back"),
@@ -44,7 +45,7 @@ const KEYS: &[(&str, &str)] = &[
     ("n", "note on the card, or on the last answer"),
     ("last row", "something else: tell the agent in your words"),
     ("a", "ask the session back"),
-    ("a on ✉", "follow up on the answer"),
+    ("a on {answer}", "follow up on the answer"),
     ("s", "skip to the end of the stack"),
     ("o", "open the link (MR, PR, ticket)"),
     ("r", "reload"),
@@ -125,7 +126,7 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
         deck_draw(f, s, deck, &mut drawn);
     }
     if s.help {
-        help(f, area);
+        help(f, s, area);
     }
     drawn
 }
@@ -193,7 +194,7 @@ fn status(s: &State) -> Option<Line<'static>> {
     if let Some(p) = &s.pending {
         let choice = match &p.custom {
             _ if p.decision.is_answer() => "seen".to_string(),
-            Some(text) => format!("✎ {text}"),
+            Some(text) => format!("{} {text}", s.icons.pen),
             None => {
                 let text = p
                     .decision
@@ -381,20 +382,20 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
     }
     if d.is_answer() {
         title.push(Span::styled(
-            " · ✉ answer",
+            format!(" · {} answer", s.icons.answer),
             Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
         ));
     }
     title.push(Span::raw(" "));
     if d.question_back && !d.is_answer() {
         title.push(Span::styled(
-            "↩ reply ",
+            format!("{} reply ", s.icons.reply),
             Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
         ));
     }
     let block = card_block(theme::band_color(band(age)))
         .title(Line::from(title))
-        .title_top(Line::from(format!(" ⏱ {} ", age_label(age))).right_aligned());
+        .title_top(Line::from(format!(" {} {} ", s.icons.age, age_label(age))).right_aligned());
     if d.is_answer() {
         return answer_front(f, s, d, rect, block);
     }
@@ -407,16 +408,16 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
     ];
     if let Some(note) = s.notes.get(&d.id) {
         lines.push(Line::styled(
-            format!("✎ note: {note}"),
+            format!("{} note: {note}", s.icons.pen),
             Style::new().fg(theme::LAVENDER),
         ));
         lines.push(Line::default());
     }
     if let Some(fl) = s.failed.get(&d.id) {
-        let what = fl
-            .custom
-            .as_ref()
-            .map_or_else(|| fl.n.to_string(), |text| format!("✎ {text}"));
+        let what = fl.custom.as_ref().map_or_else(
+            || fl.n.to_string(),
+            |text| format!("{} {text}", s.icons.pen),
+        );
         lines.push(Line::styled(
             format!("send failed: {} · ⏎ retries {what}", fl.error),
             Style::new().fg(theme::RED),
@@ -441,7 +442,7 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
         if s.cursor == Some(i) {
             style = style.bg(theme::SELECT);
         }
-        let star = if o.recommended { "★" } else { " " };
+        let star = if o.recommended { s.icons.star } else { " " };
         lines.push(Line::styled(format!("{star} {}  {}", o.n, o.text), style));
     }
     let slot = d.options.len() + 1;
@@ -455,7 +456,7 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
         style = style.fg(theme::TEXT).bg(theme::SELECT);
     }
     lines.push(Line::styled(
-        format!("✎ {number}  Something else… tell the agent"),
+        format!("{} {number}  Something else… tell the agent", s.icons.pen),
         style,
     ));
     lines.push(Line::default());
@@ -506,7 +507,7 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
     let (body, field) = split_input(s, block.inner(rect));
     let room = usize::from(body.height).saturating_sub(lines.len() + tail.len());
     let mut answer = markdown::render(&d.context, body.width);
-    let mut thread = thread(d, body.width);
+    let mut thread = thread(s, d, body.width);
     // The answer gives way first, down to a line and its cut note; then the oldest replies.
     let fit = room.saturating_sub(answer.len().min(2) + 1);
     if thread.len() > fit {
@@ -540,7 +541,7 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
 
 /// An answer card's follow-ups and the session's replies, each led by who wrote it, then a
 /// waiting line while the last one is yours.
-fn thread(d: &Decision, width: u16) -> Vec<Line<'static>> {
+fn thread(s: &State, d: &Decision, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for e in &d.discussion {
         let label = format!("{}: ", e.who);
@@ -564,7 +565,7 @@ fn thread(d: &Decision, width: u16) -> Vec<Line<'static>> {
     }
     if d.discussion.last().is_some_and(|e| e.who == "you") {
         lines.push(Line::styled(
-            "⧗ waiting for the session's reply",
+            format!("{} waiting for the session's reply", s.icons.waiting),
             Style::new().fg(theme::MUTED),
         ));
     }
@@ -656,7 +657,11 @@ fn empty(f: &mut Frame, deck: Rect) -> Rect {
     r
 }
 
-fn help(f: &mut Frame, area: Rect) {
+fn help(f: &mut Frame, s: &State, area: Rect) {
+    let icon = |t: &str| {
+        t.replace("{star}", s.icons.star)
+            .replace("{answer}", s.icons.answer)
+    };
     let (w, h) = (52.min(area.width), (KEYS.len() as u16 + 2).min(area.height));
     let r = Rect {
         x: area.x + (area.width - w) / 2,
@@ -670,12 +675,12 @@ fn help(f: &mut Frame, area: Rect) {
         .map(|(k, what)| {
             Line::from(vec![
                 Span::styled(
-                    format!(" {k:<9}"),
+                    format!(" {:<9}", icon(k)),
                     Style::new()
                         .fg(theme::LAVENDER)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(*what, Style::new().fg(theme::TEXT)),
+                Span::styled(icon(what), Style::new().fg(theme::TEXT)),
             ])
         })
         .collect();
@@ -1325,5 +1330,40 @@ mod tests {
         );
         let all = screen(&render(&s, 80, 24).0);
         assert!(all.contains("ask failed: boom · a retries"), "{all}");
+    }
+
+    #[test]
+    fn nerd_icons_replace_the_text_ones() {
+        let nerd = |list: Vec<Decision>| {
+            let mut s = state(list, T0 + 13 * MIN);
+            s.icons = theme::NERD_ICONS;
+            s
+        };
+        let mut list = fixture();
+        list[0].question_back = true;
+        let mut s = nerd(list);
+        s.notes.insert("D-1".into(), "use staging".into());
+        let mut all = screen(&render(&s, 80, 24).0);
+        s.help = true;
+        all += &screen(&render(&s, 80, 24).0);
+        let mut d = answer_card();
+        d.discussion = vec![said("you", "Is it flaky on main too?")];
+        all += &screen(&render(&nerd(vec![d]), 80, 24).0);
+        for want in [
+            "\u{f005} 1  Push and post",
+            "\u{f112} reply",
+            "\u{f017} 13m",
+            "\u{f040} note: use staging",
+            "\u{f040} 4  Something else… tell the agent",
+            "else \u{f005}",
+            "a on \u{f0e0}",
+            "D-5 · pi · repo · \u{f0e0} answer",
+            "\u{f252} waiting for the session's reply",
+        ] {
+            assert!(all.contains(want), "{want:?} missing:\n{all}");
+        }
+        for text in ['★', '✉', '↩', '⏱', '✎', '⧗'] {
+            assert!(!all.contains(text), "{text} left:\n{all}");
+        }
     }
 }

@@ -1,4 +1,4 @@
-//! Tokyo Night Storm, to match nvim, Ghostty and the lavender popup frames.
+//! Tokyo Night Storm, to match nvim, Ghostty and the lavender popup frames, and the icons.
 
 use ratatui::style::Color;
 
@@ -25,6 +25,55 @@ pub fn band_color(b: Band) -> Color {
     }
 }
 
+/// The glyphs the deck and `count --badge` draw: text ones, or Nerd Font (Font Awesome)
+/// ones for terminals that have them. Key hints, ✓, → and the undo bar stay text in both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Icons {
+    pub hand: &'static str,
+    pub answer: &'static str,
+    pub reply: &'static str,
+    pub age: &'static str,
+    pub star: &'static str,
+    pub pen: &'static str,
+    pub waiting: &'static str,
+}
+
+pub const TEXT_ICONS: Icons = Icons {
+    hand: "✋",
+    answer: "✉",
+    reply: "↩",
+    age: "⏱",
+    star: "★",
+    pen: "✎",
+    waiting: "⧗",
+};
+
+pub const NERD_ICONS: Icons = Icons {
+    hand: "\u{f256}",
+    answer: "\u{f0e0}",
+    reply: "\u{f112}",
+    age: "\u{f017}",
+    star: "\u{f005}",
+    pen: "\u{f040}",
+    waiting: "\u{f252}",
+};
+
+impl Icons {
+    /// `nerd` for the Nerd Font set; anything else is the text set.
+    pub fn named(name: &str) -> Self {
+        match name.trim() {
+            "nerd" => NERD_ICONS,
+            _ => TEXT_ICONS,
+        }
+    }
+}
+
+impl Default for Icons {
+    fn default() -> Self {
+        TEXT_ICONS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -35,5 +84,16 @@ mod tests {
             [Band::Fresh, Band::Warm, Band::Old, Band::Stale].map(band_color),
             [BLUE, YELLOW, ORANGE, RED]
         );
+    }
+
+    #[test]
+    fn icons_by_name_default_to_text() {
+        assert_eq!(Icons::named("nerd"), NERD_ICONS);
+        assert_eq!(Icons::named(" nerd "), NERD_ICONS);
+        for other in ["text", "", "emoji", "Nerd"] {
+            assert_eq!(Icons::named(other), TEXT_ICONS, "{other:?}");
+        }
+        assert_eq!(Icons::default(), TEXT_ICONS);
+        assert_eq!(NERD_ICONS.star, "\u{f005}");
     }
 }
