@@ -228,9 +228,9 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
             let line = match (badge, n, answers) {
                 (false, 0, _) | (true, 0, 0) => None,
                 (false, n, _) => Some(n.to_string()),
-                (true, 0, a) => Some(format!("✉ {a}")),
+                (true, 0, a) => Some(format!("{} {a}", cfg.icons.answer)),
                 (true, n, 0) => Some(format!("{} {n}", cfg.badge)),
-                (true, n, a) => Some(format!("{} {n} ✉ {a}", cfg.badge)),
+                (true, n, a) => Some(format!("{} {n} {} {a}", cfg.badge, cfg.icons.answer)),
             };
             if let Some(line) = line {
                 println!("{line}");

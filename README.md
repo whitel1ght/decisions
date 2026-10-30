@@ -166,6 +166,7 @@ on_answer = ""           # command run on every answer, own-words answer and ask
 mr_strip_prefix = ""     # removed from repository names in short MR labels
 title = "decisions"      # the deck's header name; a second deck can be called something else
 badge = "✋"             # the glyph `decisions count --badge` prints before the number
+icons = "text"           # "text" | "nerd": Nerd Font icons in the deck and the badge
 
 [telegram]
 token_cmd = ""           # a command that prints the bot token
@@ -176,10 +177,16 @@ context = "full"         # "full" | "none": include each card's context in its m
 | Environment | Overrides |
 |---|---|
 | `DECISIONS_DIR` | where the queue lives (default `~/.local/state/decisions`) |
-| `DECISIONS_WAIT`, `DECISIONS_MODE`, `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP`, `DECISIONS_TITLE`, `DECISIONS_BADGE` | the config keys |
+| `DECISIONS_WAIT`, `DECISIONS_MODE`, `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP`, `DECISIONS_TITLE`, `DECISIONS_BADGE`, `DECISIONS_ICONS` | the config keys |
 | `DECISIONS_SESSION` | a label added to the cards' "who asked" |
 | `DECISIONS_TELEGRAM_TOKEN` | the bot token itself (wins over `token_cmd`) |
 | `DECISIONS_TELEGRAM_TOKEN_CMD`, `DECISIONS_TELEGRAM_IDLE`, `DECISIONS_TELEGRAM_CONTEXT` | the `[telegram]` keys |
+
+`icons = "nerd"` draws the deck's ✋ ✉ ↩ ⏱ ★ ✎ ⧗ and the badge as single-colour Nerd Font
+(Font Awesome) glyphs, so they match each other and the rest of a Nerd Font status line. It
+needs a Nerd Font, or a terminal that bundles its symbols (Ghostty does); without one they show
+as boxes, so the default stays `text`. Any other value is `text`. A set `badge` still wins over
+the hand; Telegram keeps its emoji.
 
 `on_answer` runs with `/bin/sh -c` and gets one JSON line on stdin (10 s limit; a failure warns
 and never undoes the answer):

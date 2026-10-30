@@ -139,7 +139,7 @@ fn watch(dir: PathBuf, tx: mpsc::Sender<Event>) -> Option<Debouncer<RecommendedW
 
 pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
     let (backend, reload_every): (Arc<dyn Backend>, Duration) = if demo {
-        (Arc::new(Demo::new()), DEMO_RELOAD_EVERY)
+        (Arc::new(Demo::new(cfg.icons)), DEMO_RELOAD_EVERY)
     } else {
         (Arc::new(crate::live::Live::new(cfg)), RELOAD_EVERY)
     };
@@ -167,6 +167,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
     let mut s = State::new(now_ms());
     s.demo = demo;
     s.title = cfg.title.clone();
+    s.icons = cfg.icons;
     let mut fx = Fx::default();
     let mut areas = Areas::default();
     let mut runner = Runner {

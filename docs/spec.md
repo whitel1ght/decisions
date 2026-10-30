@@ -120,10 +120,17 @@ mode = "always"        # "always" | "on-request": what the MCP server tells agen
 wait = 50              # seconds an MCP call waits before returning pending; 0 = no limit
 on_answer = ""         # command run on every answer, own-words answer and ask-back
 mr_strip_prefix = ""   # removed from repository names in short MR labels, e.g. "acme-"
+icons = "text"         # "text" | "nerd": the deck's and the badge's icons; anything else is "text"
 ```
 
 Environment overrides: `DECISIONS_DIR`, `DECISIONS_WAIT`, `DECISIONS_MODE`,
-`DECISIONS_SESSION` (a label added to `source`), `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP`.
+`DECISIONS_SESSION` (a label added to `source`), `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP`,
+`DECISIONS_ICONS`.
+
+`icons = "nerd"` swaps ✋ ✉ ↩ ⏱ ★ ✎ ⧗ for their Nerd Font (Font Awesome) glyphs, U+F256 U+F0E0
+U+F112 U+F017 U+F005 U+F040 U+F252; it needs a Nerd Font, or a terminal that bundles its
+symbols (Ghostty does). Key hints, ✓, → and the undo bar stay text; Telegram keeps its emoji. A
+set `badge` still wins over the hand in `count --badge`.
 
 ## The `on_answer` hook
 
