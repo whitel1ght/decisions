@@ -134,12 +134,19 @@ impl Doc {
         self.require_open(id)
     }
 
-    /// The text of the user's follow-up waiting on an answer card, or "".
+    /// The user's follow-ups waiting on an answer card (every entry since the session's last
+    /// reply, one per paragraph), or "".
     fn followup(&self) -> String {
-        match discussion(self.section("Discussion")).pop() {
-            Some(e) if self.is_answer() && e.who == "you" => e.text,
-            _ => String::new(),
+        if !self.is_answer() {
+            return String::new();
         }
+        let entries = discussion(self.section("Discussion"));
+        let waiting = entries.iter().rev().take_while(|e| e.who == "you").count();
+        entries[entries.len() - waiting..]
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     fn require_open(&self, id: &str) -> Result<()> {
@@ -747,6 +754,9 @@ impl Store {
         if let Some(mut doc) = self.open_docs().0.into_iter().find(|d| {
             d.is_answer()
                 && d.get("source") == source
+                && (n.session.trim().is_empty()
+                    || d.get("session").is_empty()
+                    || d.get("session") == one_line(&n.session))
                 && one_line(d.section("Question")) == question
         }) {
             let id = doc.get("id").to_string();
@@ -1523,6 +1533,35 @@ mod tests {
         );
         s.seen(&id).unwrap();
         assert!(s.ask(&id, "more?").is_err(), "a seen card takes none");
+    }
+
+    #[test]
+    fn follow_ups_since_the_last_reply_all_wait() {
+        let s = store();
+        let id = s
+            .add_answer(answer_card("pi · repo", "Done?", "Yes."))
+            .unwrap();
+        s.ask(&id, "A").unwrap();
+        s.reply(&id, "ok").unwrap();
+        s.ask(&id, "B").unwrap();
+        s.ask(&id, "C").unwrap();
+        let json = s.list_json();
+        assert_eq!(
+            (&json[0]["discussion_count"], &json[0]["followup"]),
+            (&json!(4), &json!("B\n\nC"))
+        );
+    }
+
+    #[test]
+    fn two_sessions_asking_the_same_get_their_own_cards() {
+        let s = store();
+        let mut a = answer_card("claude-code · repo", "Done?", "Yes.");
+        a.session = "one".into();
+        let mut b = answer_card("claude-code · repo", "Done?", "No.");
+        b.session = "two".into();
+        let (ida, idb) = (s.add_answer(a).unwrap(), s.add_answer(b).unwrap());
+        assert_ne!(ida, idb);
+        assert!(s.show(&ida).unwrap().contains("session: one"));
     }
 
     #[test]
