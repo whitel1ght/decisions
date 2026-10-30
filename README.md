@@ -94,9 +94,11 @@ and its answer, no options, after the questions in the deck (`✉ answer` on the
 in the header, `✉ N` on the badge). `⏎` marks it seen and files it away (5 s to undo); in
 Telegram it comes with one `✓ Got it` button. `tell_user` returns at once: nothing waits on it.
 
-The card records the session that wrote it (`session:`), so you can follow up while it is open
-(`decisions ask D-7 "and the tests?"`): the follow-up goes back to that session, which answers
-with `reply` on the same card. Neither closes it; marking it seen does.
+The card records the session that wrote it (`session:`), so you can follow up while it is open:
+`a` in the deck (the box opens inside the card), a text reply to the card in Telegram, or
+`decisions ask D-7 "and the tests?"`. The follow-up goes back to that session, which answers
+with `reply` on the same card; the thread shows under the answer. Neither closes it; marking it
+seen does.
 
 ## Answering
 
@@ -112,7 +114,7 @@ with `reply` on the same card. Neither closes it; marking it seen does.
 | `u` | undo the last answer (5 s) |
 | `n` | note on the card, or on the last answer |
 | `last row` | something else: tell the agent in your own words |
-| `a` | ask the agent a question back |
+| `a` | ask the agent a question back; on an answer card (`✉`), follow up on the answer |
 | `s` | skip to the end of the stack |
 | `o` | open the link (MR, PR, ticket) |
 | `r` | reload |
@@ -201,7 +203,7 @@ For scripts and agents without MCP:
 | `decisions count [--badge]` | how many questions are open (`--badge`: `✋ N`, plus `✉ M` for answer cards) |
 | `decisions note --question Q [--key K] [--mr URL] [--source S]` | file an answer card (the answer on stdin); prints `D-<n>` |
 | `decisions seen ID` | mark an answer card read and file it under `done/<day>/` |
-| `decisions answer ID N [NOTE]` / `tell ID TEXT` / `ask ID TEXT` | answer, answer in your own words, ask back |
+| `decisions answer ID N [NOTE]` / `tell ID TEXT` / `ask ID TEXT` | answer, answer in your own words, ask back (a follow-up on an answer card) |
 | `decisions reply ID TEXT` / `withdraw ID [REASON]` / `close ID` | the asker's side |
 | `decisions wait ID [--timeout S]` | block until something happens (exit 0 answered or seen, 3 pending, 4 withdrawn, 5 asked back) |
 | `decisions setup HARNESS` | how to connect a harness |
