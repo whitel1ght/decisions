@@ -117,7 +117,9 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
             );
         }
     } else if s.queue.is_empty() && s.ghost.is_none() {
-        drawn.areas.empty = Some(empty(f, deck));
+        let (rest, field) = split_input(s, deck);
+        input_box(f, s, field);
+        drawn.areas.empty = Some(empty(f, rest));
     } else {
         deck_draw(f, s, deck, &mut drawn);
     }
@@ -180,19 +182,6 @@ fn footer(s: &State) -> String {
 
 fn status(s: &State) -> Option<Line<'static>> {
     let bold = |c: Color| Style::new().fg(c).add_modifier(Modifier::BOLD);
-    if let Some(i) = &s.input {
-        let prompt = match &i.kind {
-            InputKind::Note => " note › ".to_string(),
-            InputKind::Ask { id } => format!(" ask {id} › "),
-            InputKind::CardNote { id } => format!(" note for {id} › "),
-            InputKind::Tell { id } => format!(" tell {id} › "),
-        };
-        return Some(Line::from(vec![
-            Span::styled(prompt, bold(theme::LAVENDER)),
-            Span::styled(i.text.clone(), Style::new().fg(theme::TEXT)),
-            Span::styled("▏", Style::new().fg(theme::LAVENDER)),
-        ]));
-    }
     if s.quitting {
         return Some(Line::styled(
             " sending… · q again to quit anyway",
@@ -213,6 +202,13 @@ fn status(s: &State) -> Option<Line<'static>> {
                 format!("{}  {text}", p.n)
             }
         };
+        let answered = Span::styled(
+            format!(" ✓ {} → {choice}", p.decision.id),
+            bold(theme::GREEN),
+        );
+        if p.paused {
+            return Some(Line::from(answered));
+        }
         let left = (p.due - s.now).clamp(0, UNDO_MS);
         let filled = ((left * 10 + UNDO_MS - 1) / UNDO_MS) as usize;
         let bar = format!(
@@ -222,10 +218,7 @@ fn status(s: &State) -> Option<Line<'static>> {
             (left + 999) / 1000
         );
         return Some(Line::from(vec![
-            Span::styled(
-                format!(" ✓ {} → {choice}", p.decision.id),
-                bold(theme::GREEN),
-            ),
+            answered,
             Span::styled("   u undo · n note  ", Style::new().fg(theme::MUTED)),
             Span::styled(bar, Style::new().fg(theme::GREEN)),
         ]));
@@ -293,6 +286,72 @@ fn card_block(color: Color) -> Block<'static> {
         .border_style(Style::new().fg(color))
         .padding(Padding::new(1, 1, 1, 0))
         .style(Style::new().bg(theme::BG))
+}
+
+fn input_label(kind: &InputKind) -> String {
+    match kind {
+        InputKind::Note => "note".into(),
+        InputKind::Ask { id } => format!("ask {id}"),
+        InputKind::CardNote { id } => format!("note for {id}"),
+        InputKind::Tell { id } => format!("tell {id}"),
+    }
+}
+
+/// The open input's text and cursor, and how many rows it wraps to inside a box `width` wide.
+fn input_text(s: &State, width: u16) -> Option<(Paragraph<'static>, u16)> {
+    let i = s.input.as_ref()?;
+    let text = Paragraph::new(Line::from(vec![
+        Span::styled(i.text.clone(), Style::new().fg(theme::TEXT)),
+        Span::styled("▏", Style::new().fg(theme::LAVENDER)),
+    ]))
+    .wrap(Wrap { trim: false });
+    let rows = text.line_count(width.saturating_sub(4)) as u16;
+    Some((text, rows))
+}
+
+/// Splits `area` into the content and, at its bottom, the open input's box: as tall as the
+/// wrapped text, at least 3 rows, at most about half of `area`.
+fn split_input(s: &State, area: Rect) -> (Rect, Rect) {
+    let h = input_text(s, area.width).map_or(0, |(_, rows)| {
+        (rows + 2)
+            .clamp(3, (area.height / 2).max(3))
+            .min(area.height)
+    });
+    (
+        Rect {
+            height: area.height - h,
+            ..area
+        },
+        Rect {
+            y: area.bottom() - h,
+            height: h,
+            ..area
+        },
+    )
+}
+
+/// Draws the open input in `rect`, scrolled so the end of the text, where the cursor is, shows.
+fn input_box(f: &mut Frame, s: &State, rect: Rect) {
+    let (Some(i), Some((text, rows))) = (&s.input, input_text(s, rect.width)) else {
+        return;
+    };
+    if rect.height == 0 {
+        return;
+    }
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme::LAVENDER))
+        .title(Span::styled(
+            format!(" {} ", input_label(&i.kind)),
+            Style::new()
+                .fg(theme::LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .padding(Padding::horizontal(1))
+        .style(Style::new().bg(theme::BG));
+    let top = rows.saturating_sub(rect.height.saturating_sub(2));
+    f.render_widget(Clear, rect);
+    f.render_widget(text.scroll((top, 0)).block(block), rect);
 }
 
 fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
@@ -405,12 +464,10 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
         ),
         Style::new().fg(theme::MUTED),
     ));
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(block),
-        rect,
-    );
+    let (body, field) = split_input(s, block.inner(rect));
+    f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+    input_box(f, s, field);
 }
 
 /// The front of an answer card: the user's question, the session's answer, and ⏎.
@@ -436,8 +493,9 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
             Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
         ),
     ];
-    let room = usize::from(rect.height.saturating_sub(3)).saturating_sub(lines.len() + tail.len());
-    let mut answer = markdown::render(&d.context, rect.width.saturating_sub(4));
+    let (body, field) = split_input(s, block.inner(rect));
+    let room = usize::from(body.height).saturating_sub(lines.len() + tail.len());
+    let mut answer = markdown::render(&d.context, body.width);
     if answer.len() > room {
         answer.truncate(room.saturating_sub(1));
         answer.push(Line::styled(
@@ -447,12 +505,16 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
     }
     lines.extend(answer);
     lines.append(&mut tail);
-    f.render_widget(Paragraph::new(lines).block(block), rect);
+    f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(lines), body);
+    input_box(f, s, field);
 }
 
 /// Draws the back; returns how far it can scroll.
 fn back(f: &mut Frame, s: &State, d: &Decision, rect: Rect) -> u16 {
-    let width = rect.width.saturating_sub(4);
+    let block = card_block(theme::band_color(band(s.age_ms(d)))).padding(Padding::horizontal(1));
+    let (body, field) = split_input(s, block.inner(rect));
+    let width = body.width;
     let mut lines = markdown::render(&d.context, width);
     lines.push(Line::default());
     lines.push(Line::styled(
@@ -470,16 +532,17 @@ fn back(f: &mut Frame, s: &State, d: &Decision, rect: Rect) -> u16 {
         lines.extend(markdown::render(&e.text, width));
     }
     let total = lines.len() as u16;
-    let max = total.saturating_sub(rect.height.saturating_sub(2));
+    let max = total.saturating_sub(body.height);
     let top = s.scroll.min(max);
-    let block = card_block(theme::band_color(band(s.age_ms(d))))
-        .padding(Padding::horizontal(1))
+    let block = block
         .title(
             Line::from(format!(" {} · context ", d.id))
                 .style(Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD)),
         )
         .title_top(Line::from(format!(" {}/{} ", top + 1, total.max(1))).right_aligned());
-    f.render_widget(Paragraph::new(lines).scroll((top, 0)).block(block), rect);
+    f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(lines).scroll((top, 0)), body);
+    input_box(f, s, field);
     max
 }
 
@@ -730,8 +793,28 @@ mod tests {
         assert!(all.contains("send failed: boom · ⏎ retries 2"), "{all}");
     }
 
+    fn typed(s: &mut State, text: &str) {
+        for c in text.chars() {
+            let k = if c == ' ' { Key::Space } else { Key::Char(c) };
+            let now = s.now;
+            app::update(s, Event::Key(k), now);
+        }
+    }
+
+    /// Where the input box titled `title` sits; asserts it is inside `within`.
+    fn input_box_in(buf: &Buffer, within: Rect, title: &str) -> (u16, u16) {
+        let (x, y) = find(buf, &format!("╭ {title} ─"));
+        assert!(
+            x > within.x && y > within.y && x < within.right() && y + 2 < within.bottom(),
+            "{title:?} box at ({x},{y}) is not inside {within:?}:\n{}",
+            screen(buf)
+        );
+        assert_eq!(buf[(x, y)].fg, theme::LAVENDER);
+        (x, y)
+    }
+
     #[test]
-    fn the_status_line_shows_the_undo_bar_then_the_note_input() {
+    fn the_status_line_shows_the_undo_bar_and_the_note_goes_in_the_card() {
         let mut s = state(fixture(), T0);
         app::update(&mut s, Event::Key(Key::Char('2')), T0);
         app::update(&mut s, Event::Tick, T0 + 1_500);
@@ -741,14 +824,110 @@ mod tests {
         }
         app::update(&mut s, Event::Key(Key::Char('n')), T0 + 1_500);
         app::update(&mut s, Event::Key(Key::Char('h')), T0 + 1_500);
-        assert!(screen(&render(&s, 80, 24).0).contains("note › h"));
+        let (buf, d) = render(&s, 80, 24);
+        let (x, y) = input_box_in(&buf, d.areas.card, "note");
+        assert_eq!(find(&buf, "h▏"), (x + 2, y + 1));
+        let status = &rows(&buf)[22];
+        assert!(status.contains("✓ D-1 → 2  Push only"), "{status}");
+        assert!(
+            !status.contains("u undo") && !status.contains('▏'),
+            "paused: no undo hint, no input text:\n{status}"
+        );
+    }
+
+    #[test]
+    fn a_note_with_no_card_left_sits_at_the_bottom_of_the_deck() {
+        let mut s = state(vec![fixture().remove(0)], T0);
+        app::update(&mut s, Event::Key(Key::Char('1')), T0);
+        app::update(&mut s, Event::Key(Key::Char('n')), T0);
+        typed(&mut s, "ok");
+        let (buf, d) = render(&s, 80, 24);
+        let all = screen(&buf);
+        assert!(all.contains("nothing waiting"), "{all}");
+        let (_, y) = find(&buf, "╭ note ─");
+        assert_eq!(y, 19, "{all}");
+        assert!(y > d.areas.empty.unwrap().bottom(), "{all}");
+        assert!(all.contains("ok▏"), "{all}");
     }
 
     #[test]
     fn the_ask_input_names_the_card() {
         let mut s = state(fixture(), T0);
         app::update(&mut s, Event::Key(Key::Char('a')), T0);
-        assert!(screen(&render(&s, 80, 24).0).contains("ask D-1 › "));
+        let (buf, d) = render(&s, 80, 24);
+        input_box_in(&buf, d.areas.card, "ask D-1");
+        assert!(screen(&buf).contains("▏"));
+    }
+
+    #[test]
+    fn a_long_input_wraps_and_the_box_grows() {
+        let mut s = state(fixture(), T0);
+        app::update(&mut s, Event::Key(Key::Char('a')), T0);
+        typed(&mut s, &"why not ship it ".repeat(6));
+        let (buf, d) = render(&s, 80, 24);
+        let (x, y) = input_box_in(&buf, d.areas.card, "ask D-1");
+        let all = rows(&buf);
+        let inside: Vec<String> = (y + 1..)
+            .map_while(|r| {
+                let row: String = all[usize::from(r)].chars().skip(usize::from(x)).collect();
+                row.starts_with('│').then_some(row)
+            })
+            .collect();
+        assert!(inside.len() >= 2, "{}", screen(&buf));
+        assert!(inside[0].contains("why not ship it why not"), "{inside:?}");
+        assert!(inside.last().unwrap().contains('▏'), "{inside:?}");
+        assert!(
+            screen(&buf).contains("Push the fix and post the reply?"),
+            "the card keeps its question above the box"
+        );
+    }
+
+    #[test]
+    fn a_very_long_input_shows_its_end() {
+        let mut s = state(fixture(), T0);
+        app::update(&mut s, Event::Key(Key::Char('a')), T0);
+        typed(&mut s, &format!("start {} the end", "word ".repeat(200)));
+        let (buf, d) = render(&s, 80, 24);
+        let (_, y) = input_box_in(&buf, d.areas.card, "ask D-1");
+        let all = screen(&buf);
+        assert!(all.contains("the end▏"), "{all}");
+        assert!(!all.contains("start"), "{all}");
+        let body = d.areas.card.height - 3;
+        assert!(
+            d.areas.card.bottom() - 1 - y <= body / 2 + 1,
+            "the box takes about half the card at most:\n{all}"
+        );
+    }
+
+    #[test]
+    fn the_back_leaves_room_for_the_input() {
+        let mut s = state(fixture(), T0);
+        s.side = Side::Back;
+        app::update(&mut s, Event::Key(Key::Char('a')), T0);
+        typed(&mut s, "x");
+        let (buf, d) = render(&s, 80, 24);
+        input_box_in(&buf, d.areas.card, "ask D-1");
+        let all = screen(&buf);
+        assert!(all.contains("D-1 · context") && all.contains("x▏"), "{all}");
+    }
+
+    #[test]
+    fn an_answer_card_still_cuts_its_answer_above_the_input() {
+        let mut d = answer_card();
+        d.context = (1..=40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut s = state(vec![d], T0);
+        s.input = Some(app::Input {
+            kind: InputKind::Ask { id: "D-5".into() },
+            text: "more".into(),
+        });
+        let (buf, d) = render(&s, 80, 24);
+        let (_, y) = input_box_in(&buf, d.areas.card, "ask D-5");
+        let (_, cut) = find(&buf, "… space: the full answer");
+        let (_, got) = find(&buf, "⏎  Got it");
+        assert!(cut < got && got < y, "{}", screen(&buf));
     }
 
     #[test]
@@ -906,10 +1085,12 @@ mod tests {
     fn the_tell_and_card_note_lines_name_the_card() {
         let mut s = state(fixture(), T0);
         app::update(&mut s, Event::Key(Key::Char('4')), T0);
-        assert!(screen(&render(&s, 80, 24).0).contains("tell D-1 › "));
+        let (buf, d) = render(&s, 80, 24);
+        input_box_in(&buf, d.areas.card, "tell D-1");
         let mut s = state(fixture(), T0);
         app::update(&mut s, Event::Key(Key::Char('n')), T0);
-        assert!(screen(&render(&s, 80, 24).0).contains("note for D-1 › "));
+        let (buf, d) = render(&s, 80, 24);
+        input_box_in(&buf, d.areas.card, "note for D-1");
     }
 
     #[test]
