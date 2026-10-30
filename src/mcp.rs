@@ -28,6 +28,8 @@ struct Server<W: Write> {
     mode: Mode,
     wait: u64,
     session: Option<String>,
+    /// The id of the session this server serves, stamped on its answer cards.
+    owner: String,
     cwd_name: String,
     ping_every: Duration,
     out: Mutex<W>,
@@ -64,7 +66,7 @@ fn tools() -> Value {
         },
         {
             "name": "reply",
-            "description": "Answer a question the user asked back about one of your questions (the wait returned 'the user asked back'). Then call wait_for_answer again.",
+            "description": "Answer a question the user asked back about one of your questions (the wait returned 'the user asked back'), then call wait_for_answer again; or answer the user's follow-up on a card you filed with tell_user.",
             "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}}, "required": ["id", "text"]}
         },
         {
@@ -74,7 +76,7 @@ fn tools() -> Value {
         },
         {
             "name": "tell_user",
-            "description": "File your answer to a question the user asked you, as a card in their decisions app, so they find it with their other open items instead of scrolling back through the chat. Use it when the question came in while you were busy (mid-task, agents running) or the answer took a while. It does not wait; the user marks the card seen. Give the answer in the chat as well.",
+            "description": "File your answer to a question the user asked you, as a card in their decisions app, so they find it with their other open items instead of scrolling back through the chat. Use it when the question came in while you were busy (mid-task, agents running) or the answer took a while. It does not wait; the user marks the card seen. Give the answer in the chat as well. If the user follows up on the card, the follow-up reaches this session as a prompt: answer it with reply on the same id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -182,10 +184,12 @@ impl<W: Write> Server<W> {
             "reply" => str_arg(args, "id").and_then(|qid| {
                 let text = str_arg(args, "text")?;
                 self.store.reply(&qid, &text).map_err(|e| e.0)?;
-                Ok(text_result(
-                    format!("replied on {qid}; call wait_for_answer(\"{qid}\") for the answer"),
-                    json!({"status": "ok", "id": qid}),
-                ))
+                let message = if self.store.is_answer_card(&qid) {
+                    format!("replied on {qid}; the user sees it on the card")
+                } else {
+                    format!("replied on {qid}; call wait_for_answer(\"{qid}\") for the answer")
+                };
+                Ok(text_result(message, json!({"status": "ok", "id": qid})))
             }),
             "withdraw" => str_arg(args, "id").and_then(|qid| {
                 self.store
@@ -271,6 +275,7 @@ impl<W: Write> Server<W> {
                 source: self.source(),
                 question,
                 answer,
+                session: self.owner.clone(),
             })
             .map_err(|e| e.0)
     }
@@ -336,7 +341,19 @@ pub fn serve<R: BufRead, W: Write + Send + 'static>(
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_default();
-    serve_with(input, output, cfg, PING_EVERY, cwd)
+    let owner = owner_id(
+        |k| std::env::var(k).ok(),
+        std::os::unix::process::parent_id(),
+    );
+    serve_with(input, output, cfg, PING_EVERY, cwd, owner)
+}
+
+/// `DECISIONS_OWNER`, else `CLAUDE_CODE_SESSION_ID`, else `pid:<parent pid>`.
+fn owner_id(env: impl Fn(&str) -> Option<String>, parent: u32) -> String {
+    ["DECISIONS_OWNER", "CLAUDE_CODE_SESSION_ID"]
+        .into_iter()
+        .find_map(|k| env(k).filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| format!("pid:{parent}"))
 }
 
 pub fn serve_with<R: BufRead, W: Write + Send + 'static>(
@@ -345,12 +362,14 @@ pub fn serve_with<R: BufRead, W: Write + Send + 'static>(
     cfg: &Config,
     ping_every: Duration,
     cwd_name: String,
+    owner: String,
 ) -> std::io::Result<()> {
     let server = Arc::new(Server {
         store: cfg.store(),
         mode: cfg.mode,
         wait: cfg.wait,
         session: cfg.session.clone(),
+        owner,
         cwd_name,
         ping_every,
         out: Mutex::new(output),
@@ -439,6 +458,7 @@ mod tests {
                     &c,
                     Duration::from_millis(100),
                     "repo".into(),
+                    "owner-1".into(),
                 )
                 .unwrap();
             });
@@ -817,9 +837,36 @@ mod tests {
             ("answer", "ACME-9", "test-client · repo")
         );
         assert!(d.context.contains("flaky **e2e**"));
+        assert_eq!(c.store().list_json()[0]["session"], "owner-1");
         let bad = cl.tool("tell_user", json!({"question": "Q?"}));
         assert_eq!(bad["isError"], true);
         assert!(text(&bad).contains("`answer` is required"));
+    }
+
+    #[test]
+    fn a_reply_to_a_follow_up_does_not_send_the_session_waiting() {
+        let c = cfg(0, Mode::Always);
+        let (mut cl, _) = Client::start(&c);
+        cl.tool("tell_user", json!({"question": "Done?", "answer": "Yes."}));
+        c.store().ask("D-1", "and the tests?").unwrap();
+        let r = cl.tool("reply", json!({"id": "D-1", "text": "green"}));
+        assert_eq!(text(&r), "replied on D-1; the user sees it on the card");
+        assert!(c.store().show("D-1").unwrap().contains("session: green"));
+    }
+
+    #[test]
+    fn the_owner_is_decisions_owner_else_the_claude_session_else_the_parent_pid() {
+        fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+            let vars: Vec<(String, String)> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            move |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+        }
+        let cc = ("CLAUDE_CODE_SESSION_ID", "cc-1");
+        assert_eq!(owner_id(env(&[("DECISIONS_OWNER", "pi-1"), cc]), 7), "pi-1");
+        assert_eq!(owner_id(env(&[("DECISIONS_OWNER", " "), cc]), 7), "cc-1");
+        assert_eq!(owner_id(env(&[]), 7), "pid:7");
     }
 
     #[test]

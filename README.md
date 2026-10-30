@@ -94,6 +94,10 @@ and its answer, no options, after the questions in the deck (`✉ answer` on the
 in the header, `✉ N` on the badge). `⏎` marks it seen and files it away (5 s to undo); in
 Telegram it comes with one `✓ Got it` button. `tell_user` returns at once: nothing waits on it.
 
+The card records the session that wrote it (`session:`), so you can follow up while it is open
+(`decisions ask D-7 "and the tests?"`): the follow-up goes back to that session, which answers
+with `reply` on the same card. Neither closes it; marking it seen does.
+
 ## Answering
 
 | Key | |

@@ -68,6 +68,7 @@ blocks: reply
 status: open            # open | answered | withdrawn | seen
 source: claude-code · repo-name · session-label
 kind: answer            # only on answer cards
+session: 3f9c…          # only on answer cards: the writer's session id
 ---
 ## Question
 Push the fix and post the reply?
@@ -88,11 +89,16 @@ at: 2026-10-20T11:20:00+03:00
 - An own-words answer is `## Answer` `your words — <text>`.
 - An answer card (`kind: answer`, filed by `tell_user` or `decisions note`) reports a session's
   answer to the user's question: `## Question` is the user's question, `## Context` the answer,
-  no `## Options`. It cannot be answered, told or asked back; `seen` sets `status: seen`,
+  no `## Options`. It cannot be answered or told; `seen` sets `status: seen`,
   `## Answer` `seen` with `at:`, and moves it to `done/<day>/` at once. The same source filing
   the same question while its card is open replaces the answer. Answer cards list after every
   question; `count` leaves them out (`count --badge` adds `✉ M`). `kind` is written only when
   non-empty, after `source`.
+- Follow-ups: while an answer card is open, `ask` appends the user's follow-up (`you:`) to
+  `## Discussion` and the session answers with `reply` (`session:`); neither closes the card.
+  `session` (written by `tell_user`, only when non-empty) names the session that wrote the card,
+  so a follow-up can reach it: `DECISIONS_OWNER` if set, else `CLAUDE_CODE_SESSION_ID`, else
+  `pid:<parent pid>` of the MCP server. The `asked` event carries it as `session`.
 - `key`, `mr`, `blocks`, `source` may be empty. `source` is written last and only when
   non-empty, so a file without it stays byte-identical to the older Python format. Options: 2 to 9, at most one `(recommended)`.
 - Numbers never repeat: the next id is one more than the highest in the folder and `done/`.
@@ -101,8 +107,9 @@ at: 2026-10-20T11:20:00+03:00
   lose each other's changes.
 - `list --json` returns every field: `id, key, mr, mr_short, source, kind, question, asked, age,
   blocks, question_back, options[{n,text,recommended}], recommended, context,
-  discussion[{at,who,text}]`. `question_back` is true when the last discussion entry is the
-  user's.
+  discussion[{at,who,text}], session, discussion_count, followup`. `question_back` is true when
+  the last discussion entry is the user's; `followup` is that entry's text on an answer card,
+  else `""`; `session` is `""` when the card has none.
 
 ## Config
 
@@ -156,7 +163,7 @@ the agent's system prompt), by `mode`:
 |---|---|---|
 | `ask_user` | `question`; `options` (2–8 strings); optional `recommended` (1-based), `context` (markdown), `link` (URL), `ticket`, `blocks` | an outcome (below) |
 | `wait_for_answer` | `id`; optional `timeout_seconds` | an outcome |
-| `reply` | `id`, `text` | ok; answers a question the user asked back |
+| `reply` | `id`, `text` | ok; answers a question the user asked back, or a follow-up on an answer card |
 | `withdraw` | `id`; optional `reason` | ok |
 | `tell_user` | `question` (the user's), `answer` (markdown); optional `link`, `ticket` | `filed` with the id, at once |
 
