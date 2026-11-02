@@ -118,6 +118,7 @@ seen does.
 | `s` | skip to the end of the stack |
 | `o` | open the link (MR, PR, ticket) |
 | `r` | reload |
+| `S` | stats screen: answered and withdrawn per day, median time to answer, summary (esc or `S` returns) |
 | `?` | all the keys |
 | `q / esc` | send pending answers and close |
 

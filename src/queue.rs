@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::stats::{self, Stats};
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Opt {
     pub n: u8,
@@ -77,6 +79,14 @@ pub trait Backend: Send + Sync {
     fn ask(&self, id: &str, text: &str) -> Result<Option<String>, String>;
     fn tell(&self, id: &str, text: &str) -> Result<Option<String>, String>;
     fn seen(&self, id: &str) -> Result<Option<String>, String>;
+    /// Usage statistics for the stats screen; the demo has no history.
+    fn stats(&self, days: u32) -> Result<Stats, String> {
+        Ok(stats::compute(
+            &[],
+            chrono::Local::now().fixed_offset(),
+            days,
+        ))
+    }
 }
 
 #[cfg(test)]

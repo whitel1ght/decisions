@@ -3,6 +3,7 @@
 use crate::config::Config;
 use crate::hook;
 use crate::queue::{Backend, Decision};
+use crate::stats::{self, Stats};
 use crate::store::{Event, Store};
 
 pub struct Live {
@@ -43,6 +44,15 @@ impl Backend for Live {
 
     fn seen(&self, id: &str) -> Result<Option<String>, String> {
         self.store.seen(id).map(|_| None).map_err(|e| e.0)
+    }
+
+    fn stats(&self, days: u32) -> Result<Stats, String> {
+        let (cards, _) = self.store.cards();
+        Ok(stats::compute(
+            &cards,
+            chrono::Local::now().fixed_offset(),
+            days,
+        ))
     }
 }
 

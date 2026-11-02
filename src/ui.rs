@@ -3,14 +3,17 @@
 //! back can scroll (for `app`).
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Margin, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{
+    Bar, BarChart, BarGroup, Block, BorderType, Clear, Padding, Paragraph, Sparkline, Wrap,
+};
 
 use crate::app::{FLIP_MS, InputKind, Side, State, UNDO_MS, age_label, band};
 use crate::markdown;
 use crate::queue::Decision;
+use crate::stats::{self, Stats};
 use crate::theme;
 
 pub const MIN_W: u16 = 50;
@@ -49,6 +52,7 @@ const KEYS: &[(&str, &str)] = &[
     ("s", "skip to the end of the stack"),
     ("o", "open the link (MR, PR, ticket)"),
     ("r", "reload"),
+    ("S", "stats: the last 14 days"),
     ("q / esc", "send pending answers and close"),
 ];
 
@@ -104,7 +108,9 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
         rows.height -= 1;
     }
     let deck = rows.inner(Margin::new(1, 0));
-    if !s.loaded {
+    if let Some(st) = &s.stats {
+        stats_screen(f, s, st, deck);
+    } else if !s.loaded {
         if s.error.is_none() {
             let msg = Paragraph::new("loading…")
                 .alignment(Alignment::Center)
@@ -169,6 +175,7 @@ fn footer(s: &State) -> String {
             InputKind::Ask { .. } => "⏎ ask · esc cancel",
         },
         (None, true, ..) => "any key closes help",
+        (None, false, _, _) if s.stats.is_some() => "esc / S back to the deck",
         (None, false, Side::Back, _) => {
             "j/k scroll · ^d/^u page · J/K cards · space front · 1-9 answer · ? help"
         }
@@ -657,6 +664,128 @@ fn empty(f: &mut Frame, deck: Rect) -> Rect {
     r
 }
 
+/// Days on the chart: a bar for answered, one for withdrawn, and a gap before the next day.
+const GROUP_W: u16 = 3;
+
+fn stats_screen(f: &mut Frame, s: &State, st: &Stats, area: Rect) {
+    let panel = |title: String| {
+        Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(theme::LAVENDER))
+            .title(Line::styled(title, Style::new().fg(theme::BLUE)))
+    };
+    let chart_w = st.days.len() as u16 * GROUP_W + 2;
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(chart_w), Constraint::Min(0)]).areas(area);
+    let [top, bottom] = Layout::vertical([Constraint::Min(5), Constraint::Length(4)]).areas(left);
+
+    let groups: Vec<BarGroup> = st
+        .days
+        .iter()
+        .map(|d| {
+            let bar = |v: usize, c: Color| {
+                Bar::default()
+                    .value(v as u64)
+                    .text_value(String::new())
+                    .style(Style::new().fg(c))
+            };
+            BarGroup::new(vec![
+                bar(d.answered, theme::GREEN),
+                bar(d.withdrawn, theme::ORANGE),
+            ])
+            .label(Line::from(d.day.get(8..).unwrap_or("").to_string()))
+        })
+        .collect();
+    let mut chart = BarChart::default()
+        .block(panel(String::new()).title(Line::from(vec![
+            Span::styled(" per day · ", Style::new().fg(theme::BLUE)),
+            Span::styled("▌answered ", Style::new().fg(theme::GREEN)),
+            Span::styled("▌withdrawn ", Style::new().fg(theme::ORANGE)),
+        ])))
+        .bar_width(1)
+        .bar_gap(0)
+        .group_gap(1)
+        .label_style(Style::new().fg(theme::MUTED));
+    for g in groups {
+        chart = chart.data(g);
+    }
+    f.render_widget(chart, top);
+
+    let data: Vec<u64> = st
+        .days
+        .iter()
+        .flat_map(|d| {
+            let v = d.median_secs.map_or(0, |m| m.max(0) as u64);
+            [v; GROUP_W as usize]
+        })
+        .collect();
+    f.render_widget(
+        Sparkline::default()
+            .block(panel(" median time to answer ".into()))
+            .data(&data)
+            .style(Style::new().fg(theme::BLUE)),
+        bottom,
+    );
+
+    let opt = |v: Option<i64>| v.map_or("-".into(), stats::human);
+    let label = |t: &str| {
+        let pad = 11usize.saturating_sub(unicode_width::UnicodeWidthStr::width(t));
+        Span::styled(
+            format!("{t}{}", " ".repeat(pad)),
+            Style::new().fg(theme::MUTED),
+        )
+    };
+    let val = |t: String| Span::styled(t, Style::new().fg(theme::TEXT));
+    let list = |v: &[(String, usize)]| -> Vec<Line> {
+        if v.is_empty() {
+            return vec![Line::from(val("  -".into()))];
+        }
+        v.iter()
+            .map(|(k, n)| {
+                Line::from(vec![
+                    val(format!("  {}", stats::quote(k))),
+                    Span::styled(format!(" ×{n}"), Style::new().fg(theme::MUTED)),
+                ])
+            })
+            .collect()
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            label(&format!("{} median", s.icons.age)),
+            val(opt(st.median_secs)),
+        ]),
+        Line::from(vec![label("  p90"), val(opt(st.p90_secs))]),
+        Line::from(vec![
+            label(&format!("{} open", s.icons.hand)),
+            val(format!(
+                "{}, oldest {}",
+                st.open_now,
+                opt(st.oldest_open_secs)
+            )),
+        ]),
+        Line::from(vec![
+            label(&format!("{} answers", s.icons.answer)),
+            val(st.answer_cards.to_string()),
+        ]),
+        Line::from(vec![
+            label("answered"),
+            val(format!(
+                "{} of {}",
+                st.answered,
+                st.days.iter().map(|d| d.asked).sum::<usize>()
+            )),
+        ]),
+        Line::styled("blocks", Style::new().fg(theme::MUTED)),
+    ];
+    lines.extend(list(&st.top_blocks));
+    lines.push(Line::styled("sources", Style::new().fg(theme::MUTED)));
+    lines.extend(list(&st.sources));
+    f.render_widget(
+        Paragraph::new(lines).block(panel(format!(" last {} days ", st.window_days))),
+        right,
+    );
+}
+
 fn help(f: &mut Frame, s: &State, area: Rect) {
     let icon = |t: &str| {
         t.replace("{star}", s.icons.star)
@@ -1022,6 +1151,62 @@ mod tests {
     fn too_small_asks_for_a_bigger_window() {
         let s = state(fixture(), T0);
         assert!(screen(&render(&s, 40, 10).0).contains("make the window larger (50×14)"));
+    }
+
+    fn fixture_stats() -> Stats {
+        let store = crate::store::Store::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stats"),
+            "",
+        );
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-22T12:00:00+03:00").unwrap();
+        stats::compute(&store.cards().0, now, 14)
+    }
+
+    #[test]
+    fn the_stats_screen_shows_the_chart_the_median_and_the_summary() {
+        let mut s = state(fixture(), T0);
+        s.stats = Some(fixture_stats());
+        let (buf, _) = render(&s, 80, 24);
+        let all = screen(&buf);
+        for want in [
+            "per day",
+            "answered",
+            "withdrawn",
+            "median time to answer",
+            "last 14 days",
+            "⏱ median",
+            "20m",
+            "p90",
+            "30m",
+            "open",
+            "oldest",
+            "answers",
+            "blocks",
+            "merge ×2",
+            "sources",
+            "claude-code ×3",
+            "esc / S back to the deck",
+        ] {
+            assert!(all.contains(want), "{want:?} not in:\n{all}");
+        }
+    }
+
+    #[test]
+    fn the_stats_screen_renders_empty_and_small_without_panicking() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-22T12:00:00+03:00").unwrap();
+        for (w, h) in [(80, 24), (50, 14), (120, 40), (30, 10)] {
+            for st in [stats::compute(&[], now, 14), fixture_stats()] {
+                let mut s = state(Vec::new(), T0);
+                s.stats = Some(st);
+                let all = screen(&render(&s, w, h).0);
+                if w >= MIN_W && h >= MIN_H {
+                    assert!(all.contains("per day"), "{w}x{h}:\n{all}");
+                }
+            }
+        }
+        let mut s = state(Vec::new(), T0);
+        s.stats = Some(stats::compute(&[], now, 14));
+        assert!(screen(&render(&s, 80, 24).0).contains("0, oldest -"));
     }
 
     #[test]

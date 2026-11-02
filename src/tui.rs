@@ -25,6 +25,8 @@ pub const OPENER: &str = if cfg!(target_os = "macos") {
 } else {
     "xdg-open"
 };
+/// The stats screen looks back this many days.
+const STATS_DAYS: u32 = 14;
 const SEND_WAIT: Duration = Duration::from_secs(10);
 
 fn now_ms() -> i64 {
@@ -47,6 +49,12 @@ impl Runner {
     fn run(&mut self, cmd: Command) -> bool {
         match cmd {
             Command::Reload => self.reload(),
+            Command::LoadStats => {
+                let (decide, tx) = (self.decide.clone(), self.tx.clone());
+                thread::spawn(move || {
+                    let _ = tx.send(Event::StatsLoaded(decide.stats(STATS_DAYS).map(Box::new)));
+                });
+            }
             Command::Answer { id, n, note } => {
                 self.send(id, false, move |d, id| d.answer(id, n, note.as_deref()))
             }

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::queue::Decision;
+use crate::stats::Stats;
 use crate::theme::Icons;
 
 pub const UNDO_MS: i64 = 5_000;
@@ -40,11 +41,14 @@ pub enum Event {
         result: Result<Option<String>, String>,
     },
     Signal,
+    /// The statistics asked for with `S` are ready.
+    StatsLoaded(Result<Box<Stats>, String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Reload,
+    LoadStats,
     Answer {
         id: String,
         n: u8,
@@ -157,6 +161,8 @@ pub struct State {
     pub notes: HashMap<String, String>,
     pub input: Option<Input>,
     pub help: bool,
+    /// The stats screen, while it is open.
+    pub stats: Option<Stats>,
     pub error: Option<String>,
     pub toast: Option<(String, i64)>,
     pub ghost: Option<(Decision, i64)>,
@@ -240,6 +246,8 @@ pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
         Event::Changed => out.push(Command::Reload),
         Event::Loaded(Ok(list)) => loaded(s, list),
         Event::Loaded(Err(e)) => s.error = Some(e),
+        Event::StatsLoaded(Ok(st)) => s.stats = Some(*st),
+        Event::StatsLoaded(Err(e)) => s.toast(format!("stats failed: {e}")),
         Event::Sent { id, ask, result } => sent(s, id, ask, result, &mut out),
         Event::Signal => {
             send_pending(s, &mut out);
@@ -342,6 +350,12 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         s.help = false;
         return;
     }
+    if s.stats.is_some() {
+        if matches!(k, Key::Esc | Key::Char('S' | 'q')) {
+            s.stats = None;
+        }
+        return;
+    }
     match k {
         Key::Char('q') => quit(s, out),
         Key::Esc if s.side == Side::Back => flip(s),
@@ -353,6 +367,7 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         Key::Char('o') => open(s, out),
         Key::Char('r') => out.push(Command::Reload),
         Key::Char('?') => s.help = true,
+        Key::Char('S') => out.push(Command::LoadStats),
         Key::Space => flip(s),
         Key::Char('J') => go(s, s.cur + 1),
         Key::Char('K') if s.cur > 0 => go(s, s.cur - 1),
@@ -976,6 +991,28 @@ mod tests {
         assert_eq!(s.toast.as_ref().unwrap().0, "no MR on D-2");
         update(&mut s, Event::Tick, T0 + TOAST_MS);
         assert_eq!(s.toast, None);
+    }
+
+    #[test]
+    fn s_opens_the_stats_screen_and_esc_s_or_q_close_it() {
+        let mut s = State::new(T0);
+        assert_eq!(press(&mut s, Key::Char('S')), [Command::LoadStats]);
+        assert!(s.stats.is_none());
+        let st = crate::stats::compute(&[], chrono::Local::now().fixed_offset(), 14);
+        update(&mut s, Event::StatsLoaded(Ok(Box::new(st))), T0);
+        assert!(s.stats.is_some());
+        for k in [Key::Esc, Key::Char('S'), Key::Char('q')] {
+            s.stats = Some(crate::stats::compute(
+                &[],
+                chrono::Local::now().fixed_offset(),
+                14,
+            ));
+            assert!(press(&mut s, Key::Char('j')).is_empty() && s.stats.is_some());
+            assert!(press(&mut s, k).is_empty(), "{k:?} does not quit");
+            assert!(s.stats.is_none());
+        }
+        update(&mut s, Event::StatsLoaded(Err("boom".into())), T0);
+        assert!(s.stats.is_none() && s.toast.is_some());
     }
 
     #[test]
