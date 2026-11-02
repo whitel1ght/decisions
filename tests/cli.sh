@@ -116,6 +116,17 @@ for h in claude codex gemini opencode pi cursor generic; do
 done
 run setup nonsense >/dev/null; check "unknown harness exits 2" "2" "$?"
 
+echo "stats"
+S="$(DECISIONS_DIR="$CRATE/tests/fixtures/stats" "$BIN" stats --days 3650 --json)"
+check "stats answered" "3" "$(jq -r .answered <<<"$S")"
+check "stats median" "1200" "$(jq -r .median_secs <<<"$S")"
+check "stats p90" "1800" "$(jq -r .p90_secs <<<"$S")"
+check "stats answer cards apart" "1" "$(jq -r .answer_cards <<<"$S")"
+check "stats open now" "1" "$(jq -r .open_now <<<"$S")"
+check "stats top block" '["merge",2]' "$(jq -c '.top_blocks[0]' <<<"$S")"
+check "stats day 2026-10-21" "2 1 1 0" "$(jq -r '.days[] | select(.day=="2026-10-21") | "\(.asked) \(.answered) \(.withdrawn) \(.open)"' <<<"$S")"
+has "stats plain" "$(DECISIONS_DIR="$CRATE/tests/fixtures/stats" "$BIN" stats --days 3650)" "median 20m, p90 30m"
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

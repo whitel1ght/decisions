@@ -11,6 +11,7 @@ pub mod markdown;
 pub mod mcp;
 pub mod queue;
 pub mod setup;
+pub mod stats;
 pub mod store;
 pub mod telegram;
 pub mod theme;

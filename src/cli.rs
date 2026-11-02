@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::Config;
 use crate::store::{Event, New, NewAnswer, Outcome};
-use crate::{hook, mcp, setup, tui};
+use crate::{hook, mcp, setup, stats, tui};
 
 #[derive(Parser)]
 #[command(
@@ -70,6 +70,14 @@ pub enum Cmd {
     Count {
         #[arg(long)]
         badge: bool,
+    },
+    /// How the queue has been used: per-day counts and time to answer
+    Stats {
+        /// Days in the window, counting today
+        #[arg(long, default_value_t = 14)]
+        days: u32,
+        #[arg(long)]
+        json: bool,
     },
     /// Pick option N
     Answer {
@@ -210,6 +218,24 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
                 );
             } else {
                 for line in store.list_lines() {
+                    println!("{line}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Cmd::Stats { days, json } => {
+            let (cards, skipped) = store.cards();
+            for s in &skipped {
+                eprintln!("decisions: {s}");
+            }
+            let stats = stats::compute(&cards, chrono::Local::now().fixed_offset(), days);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&stats).unwrap_or_default()
+                );
+            } else {
+                for line in stats::lines(&stats) {
                     println!("{line}");
                 }
             }

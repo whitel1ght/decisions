@@ -207,6 +207,7 @@ For scripts and agents without MCP:
 | `decisions add --question Q --option A --option B [--recommend N] [--key K] [--mr URL] [--blocks T] [--source S]` | file a question (context on stdin); prints `D-<n>` |
 | `decisions list [--json]` | open decisions |
 | `decisions show ID` | the decision file |
+| `decisions stats [--days N] [--json]` | per-day counts and time to answer (median, p90) over the last N days (default 14) |
 | `decisions count [--badge]` | how many questions are open (`--badge`: `✋ N`, plus `✉ M` for answer cards) |
 | `decisions note --question Q [--key K] [--mr URL] [--source S]` | file an answer card (the answer on stdin); prints `D-<n>` |
 | `decisions seen ID` | mark an answer card read and file it under `done/<day>/` |

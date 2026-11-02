@@ -7,7 +7,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Local, SecondsFormat};
+use chrono::{DateTime, FixedOffset, Local, SecondsFormat};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -336,6 +336,39 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// A card as `crate::stats` sees it.
+#[derive(Debug, Clone)]
+pub struct Card {
+    pub asked: DateTime<FixedOffset>,
+    /// `open`, `answered`, `withdrawn` or `seen`.
+    pub status: String,
+    pub answer_card: bool,
+    pub blocks: String,
+    pub source: String,
+    /// The `at:` of the Answer section.
+    pub answered: Option<DateTime<FixedOffset>>,
+}
+
+impl Card {
+    fn from_doc(d: &Doc) -> Result<Self> {
+        let asked = DateTime::parse_from_rfc3339(d.get("asked"))
+            .map_err(|e| Fail(format!("bad asked {:?}: {e}", d.get("asked"))))?;
+        let answered = d
+            .section("Answer")
+            .lines()
+            .find_map(|l| l.strip_prefix("at: "))
+            .and_then(|t| DateTime::parse_from_rfc3339(t.trim()).ok());
+        Ok(Self {
+            asked,
+            status: d.get("status").into(),
+            answer_card: d.is_answer(),
+            blocks: d.get("blocks").into(),
+            source: d.get("source").into(),
+            answered,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct New {
     pub key: String,
@@ -529,6 +562,31 @@ impl Store {
             context: d.section("Context").into(),
             discussion: discussion(d.section("Discussion")),
         }
+    }
+
+    /// Every card, open and filed under `done/`, reduced to what statistics need.
+    pub fn cards(&self) -> (Vec<Card>, Vec<String>) {
+        let mut files = Vec::new();
+        walk(&self.dir, &mut files);
+        files.sort();
+        let (mut cards, mut skipped) = (Vec::new(), Vec::new());
+        for p in files {
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !(name.starts_with("D-") && name.ends_with(".md")) {
+                continue;
+            }
+            match fs::read_to_string(&p)
+                .map_err(io)
+                .and_then(|t| parse(&t))
+                .and_then(|d| Card::from_doc(&d))
+            {
+                Ok(c) => cards.push(c),
+                Err(e) => skipped.push(format!("skipped {name}: {e}")),
+            }
+        }
+        (cards, skipped)
     }
 
     pub fn list(&self) -> (Vec<Decision>, Vec<String>) {
