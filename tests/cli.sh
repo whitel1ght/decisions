@@ -125,6 +125,7 @@ check "stats answer cards apart" "1" "$(jq -r .answer_cards <<<"$S")"
 check "stats open now" "1" "$(jq -r .open_now <<<"$S")"
 check "stats top block" '["merge",2]' "$(jq -c '.top_blocks[0]' <<<"$S")"
 check "stats day 2026-10-21" "2 1 1 0" "$(jq -r '.days[] | select(.day=="2026-10-21") | "\(.asked) \(.answered) \(.withdrawn) \(.open)"' <<<"$S")"
+has "stats blocks line" "$(DECISIONS_DIR="$CRATE/tests/fixtures/stats" "$BIN" stats --days 3650)" "blocks: merge ×2 · reply ×2"
 has "stats plain" "$(DECISIONS_DIR="$CRATE/tests/fixtures/stats" "$BIN" stats --days 3650)" "median 20m, p90 30m"
 
 echo

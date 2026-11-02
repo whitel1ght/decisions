@@ -33,7 +33,8 @@ pub struct Stats {
     pub answer_cards: usize,
     /// The most common `blocks` values among the window's questions, most first.
     pub top_blocks: Vec<(String, usize)>,
-    /// Cards in the window per harness (the text before ` · ` in `source`), most first.
+    /// Cards in the window per harness (the text before ` · ` in `source`, `unknown` when a
+    /// card has none), most first.
     pub sources: Vec<(String, usize)>,
     /// Open questions now, whatever day they were asked.
     pub open_now: usize,
@@ -94,9 +95,12 @@ pub fn compute(cards: &[Card], now: DateTime<FixedOffset>, days: u32) -> Stats {
             continue;
         }
         let harness = c.source.split(" · ").next().unwrap_or("").trim();
-        if !harness.is_empty() {
-            *sources.entry(harness.to_string()).or_insert(0) += 1;
-        }
+        let harness = if harness.is_empty() {
+            "unknown"
+        } else {
+            harness
+        };
+        *sources.entry(harness.to_string()).or_insert(0) += 1;
         if c.answer_card {
             answer_cards += 1;
             continue;
@@ -157,6 +161,15 @@ pub fn human(secs: i64) -> String {
     }
 }
 
+/// A name as shown in a list: in quotes when it holds a comma or the list's separator.
+pub fn quote(name: &str) -> String {
+    if name.contains(',') || name.contains(" · ") || name.contains('"') {
+        format!("{name:?}")
+    } else {
+        name.to_string()
+    }
+}
+
 /// The plain-text report `decisions stats` prints.
 pub fn lines(s: &Stats) -> Vec<String> {
     let opt = |v: Option<i64>| v.map_or("-".into(), human);
@@ -193,9 +206,9 @@ pub fn lines(s: &Stats) -> Vec<String> {
             "-".to_string()
         } else {
             v.iter()
-                .map(|(k, n)| format!("{k} {n}"))
+                .map(|(k, n)| format!("{} ×{n}", quote(k)))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(" · ")
         }
     };
     out.push(format!("blocks: {}", join(&s.top_blocks)));
@@ -349,7 +362,27 @@ mod tests {
         assert_eq!(s.top_blocks[0], ("b".into(), 3));
         assert_eq!(s.top_blocks[1], ("c".into(), 2));
         assert_eq!(s.top_blocks[2].0, "a");
-        assert_eq!(s.sources, vec![("pi".into(), 9), ("claude-code".into(), 1)]);
+        assert_eq!(
+            s.sources,
+            vec![
+                ("pi".into(), 9),
+                ("claude-code".into(), 1),
+                ("unknown".into(), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn quoting_keeps_commas_apart() {
+        assert_eq!(quote("reply, merge"), "\"reply, merge\"");
+        assert_eq!(quote("reply"), "reply");
+        let mut c = card("2026-11-02T09:00:00+03:00", "open", None);
+        c.blocks = "reply, merge".into();
+        let l = lines(&compute(&[c], t(NOW), 1));
+        assert!(
+            l.contains(&"blocks: \"reply, merge\" ×1".to_string()),
+            "{l:?}"
+        );
     }
 
     #[test]
