@@ -100,7 +100,9 @@ in the header, `✉ N` on the badge). `⏎` marks it seen and files it away (5 s
 Telegram it comes with one `✓ Got it` button. `tell_user` returns at once: nothing waits on it.
 
 The card records the session that wrote it (`session:`), so you can follow up while it is open:
-`a` in the deck (the box opens inside the card), a text reply to the card in Telegram, or
+in the deck just type, since an answer card always has its follow-up box open (⏎ sends, ⏎ on an
+empty box is got it, ↑/↓ change cards, Esc leaves the box for the deck keys and `a` brings it
+back); a text reply to the card in Telegram; or
 `decisions ask D-7 "and the tests?"`. The follow-up goes back to that session, which answers
 with `reply` on the same card; the thread shows under the answer. Neither closes it; marking it
 seen does.
@@ -113,13 +115,13 @@ seen does.
 | `j / k` | move between the options (back: scroll) |
 | `g / G` | first / last option (back: top / bottom) |
 | `1-9` | answer with that option |
-| `⏎` | option under the cursor, else ★; on an answer card, got it |
+| `⏎` | option under the cursor, else ★; on an answer card, send the follow-up, or got it when its box is empty |
 | `space` | flip the card: context and discussion |
 | `^d / ^u` | page the back |
 | `u` | undo the last answer (5 s) |
 | `n` | note on the card, or on the last answer |
 | `last row` | something else: tell the agent in your own words |
-| `a` | ask the agent a question back; on an answer card (`✉`), follow up on the answer |
+| `a` | ask the agent a question back; on an answer card (`✉`), reopen the follow-up box after Esc |
 | `s` | skip to the end of the stack |
 | `o` | open the link (MR, PR, ticket) |
 | `r` | reload |

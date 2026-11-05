@@ -40,7 +40,7 @@ const KEYS: &[(&str, &str)] = &[
     ("g / G", "first / last option (back: top / bottom)"),
     ("1-9", "answer with that option"),
     ("⏎", "option under the cursor, else {star}"),
-    ("⏎ on {answer}", "an answer to your question: got it"),
+    ("⏎ on {answer}", "got it (with the follow-up box empty)"),
     ("↑ / ↓", "same as j / k"),
     ("space", "flip: context and discussion"),
     ("^d / ^u", "page the back"),
@@ -48,7 +48,7 @@ const KEYS: &[(&str, &str)] = &[
     ("n", "note on the card, or on the last answer"),
     ("last row", "something else: tell the agent in your words"),
     ("a", "ask the session back"),
-    ("a on {answer}", "follow up on the answer"),
+    ("{answer} typing", "follow up; esc closes the box, a opens"),
     ("s", "skip to the end of the stack"),
     ("o", "open the link (MR, PR, ticket)"),
     ("r", "reload"),
@@ -171,7 +171,9 @@ fn footer(s: &State) -> String {
             InputKind::Note => "⏎ send with note · esc no note",
             InputKind::CardNote { .. } => "⏎ attach the note (empty removes it) · esc cancel",
             InputKind::Tell { .. } => "⏎ answer in your own words · esc cancel",
-            InputKind::Ask { id } if s.is_answer_card(id) => "⏎ send the follow-up · esc cancel",
+            InputKind::Ask { id } if s.is_answer_card(id) => {
+                "type a follow-up · ⏎ send (empty: got it) · ↑↓ cards · esc deck keys"
+            }
             InputKind::Ask { .. } => "⏎ ask · esc cancel",
         },
         (None, true, ..) => "any key closes help",
@@ -499,7 +501,7 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
     }
     if let Some(af) = s.ask_failed.get(&d.id) {
         lines.push(Line::styled(
-            format!("ask failed: {} · a retries", af.error),
+            format!("ask failed: {} · ⏎ retries", af.error),
             Style::new().fg(theme::RED),
         ));
         lines.push(Line::default());
@@ -1217,7 +1219,7 @@ mod tests {
         assert!(
             all.contains("undo the last answer")
                 && all.contains("ask the session back")
-                && all.contains("a on ✉   follow up on the answer"),
+                && all.contains("✉ typing follow up; esc closes the box, a opens"),
             "{all}"
         );
     }
@@ -1397,7 +1399,8 @@ mod tests {
             "A flaky e2e test.",
             "It passed on the retry.",
             "⏎  Got it",
-            "J/K cards · ⏎ got it · a follow up · space full answer · ? help",
+            "follow up D-5",
+            "type a follow-up · ⏎ send (empty: got it) · ↑↓ cards · esc deck keys",
         ] {
             assert!(all.contains(want), "{want:?} missing:\n{all}");
         }
@@ -1493,14 +1496,22 @@ mod tests {
     #[test]
     fn the_follow_up_box_names_the_card_and_the_footer_says_send() {
         let mut s = state(vec![answer_card()], T0);
-        app::update(&mut s, Event::Key(Key::Char('a')), T0);
         typed(&mut s, "and on main?");
         let (buf, d) = render(&s, 80, 24);
         input_box_in(&buf, d.areas.card, "follow up D-5");
         let all = screen(&buf);
         assert!(all.contains("and on main?▏"), "{all}");
-        assert!(all.contains("⏎ send the follow-up · esc cancel"), "{all}");
+        assert!(
+            all.contains("type a follow-up · ⏎ send (empty: got it) · ↑↓ cards · esc deck keys"),
+            "{all}"
+        );
         assert!(all.contains("⏎  Got it"), "{all}");
+        app::update(&mut s, Event::Key(Key::Esc), T0);
+        let all = screen(&render(&s, 80, 24).0);
+        assert!(
+            all.contains("J/K cards · ⏎ got it · a follow up · space full answer · ? help"),
+            "after esc the deck keys are back: {all}"
+        );
     }
 
     #[test]
@@ -1514,7 +1525,7 @@ mod tests {
             },
         );
         let all = screen(&render(&s, 80, 24).0);
-        assert!(all.contains("ask failed: boom · a retries"), "{all}");
+        assert!(all.contains("ask failed: boom · ⏎ retries"), "{all}");
     }
 
     #[test]
@@ -1541,7 +1552,7 @@ mod tests {
             "\u{f040} note: use staging",
             "\u{f040} 4  Something else… tell the agent",
             "else \u{f005}",
-            "a on \u{f0e0}",
+            "\u{f0e0} typing",
             "D-5 · pi · repo · \u{f0e0} answer",
             "\u{f252} waiting for the session's reply",
         ] {
