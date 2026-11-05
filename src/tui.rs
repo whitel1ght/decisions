@@ -303,6 +303,9 @@ pub fn run(cfg: &crate::config::Config, demo: bool, prompt: bool) -> ExitCode {
     for (id, f) in &failed {
         eprintln!("decisions: {id} → {}: {}", f.n, f.error);
     }
+    for (text, error) in &s.prompt.lost {
+        eprintln!("decisions: message not sent ({error}): {text}");
+    }
     if runner.in_flight > 0 {
         eprintln!(
             "decisions: {} answer(s) still sending after {}s; check `decide list`",
@@ -310,7 +313,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool, prompt: bool) -> ExitCode {
             SEND_WAIT.as_secs()
         );
     }
-    if failed.is_empty() && runner.in_flight == 0 {
+    if failed.is_empty() && s.prompt.lost.is_empty() && runner.in_flight == 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

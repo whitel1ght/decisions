@@ -199,6 +199,8 @@ pub struct PromptLine {
     pub files_cwd: String,
     /// The draft of a message on its way, to put back if it fails.
     pub sending: Option<(String, Vec<Image>)>,
+    /// Messages that failed as the deck closed, with why: reported on the way out.
+    pub lost: Vec<(String, String)>,
     pub loaded_at: i64,
 }
 
@@ -232,6 +234,8 @@ impl PromptLine {
 #[derive(Debug, Default)]
 pub struct State {
     pub prompt: PromptLine,
+    /// The waiting message card that one more ⏎ drops.
+    pub drop_armed: Option<String>,
     pub queue: Vec<Decision>,
     pub cur: usize,
     pub side: Side,
@@ -479,6 +483,9 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
     if k == Key::Interrupt {
         return quit(s, out);
     }
+    if k != Key::Enter {
+        s.drop_armed = None;
+    }
     if s.prompt.open {
         return prompt_key(s, k, out);
     }
@@ -662,6 +669,13 @@ fn enter(s: &mut State, out: &mut Vec<Command>) {
         return throw(s, n, note, custom, out);
     }
     if d.is_answer() {
+        // The session may not have read a message yet, and filing the card takes it away.
+        let unread = d.prompt && d.discussion.last().is_some_and(|e| e.who == "you");
+        if unread && s.drop_armed.as_ref() != Some(&d.id) {
+            s.drop_armed = Some(d.id.clone());
+            return s.toast("still waiting for the session · ⏎ again drops the message".into());
+        }
+        s.drop_armed = None;
         return throw(s, 0, None, None, out);
     }
     if s.cursor == Some(d.options.len()) {
@@ -794,8 +808,10 @@ fn sessions_loaded(
 ) {
     let p = &mut s.prompt;
     p.sessions = list;
-    let has = |id: &String| p.sessions.iter().any(|x| &x.owner == id);
-    if !p.target.as_ref().is_some_and(has) {
+    // Only an unset target takes a default. One that left the list stays chosen, and nothing can
+    // be sent until it returns or another is picked: a draft never moves to another session.
+    if p.target.is_none() {
+        let has = |id: &String| p.sessions.iter().any(|x| &x.owner == id);
         p.target = last
             .filter(has)
             .or_else(|| p.sessions.first().map(|x| x.owner.clone()));
@@ -933,10 +949,15 @@ fn file_pick_key(s: &mut State, k: Key, at: usize, mut sel: usize) {
                 p.pick = Pick::None;
                 return;
             };
+            let range = p.text[at + 1..]
+                .find('#')
+                .map(|i| p.text[at + 1 + i..].to_string())
+                .unwrap_or_default();
             p.text.truncate(at + 1);
             p.text.push_str(path);
             // A directory stays open for the next part of its path.
             if !path.ends_with('/') {
+                p.text.push_str(&range);
                 p.text.push(' ');
                 p.pick = Pick::None;
             } else {
@@ -973,6 +994,9 @@ fn send_prompt(s: &mut State, out: &mut Vec<Command>) {
     if text.is_empty() && s.prompt.images.is_empty() {
         return;
     }
+    if s.prompt.sending.is_some() {
+        return s.toast("still sending the last message".into());
+    }
     let Some((owner, label)) = s
         .prompt
         .target_session()
@@ -1004,9 +1028,16 @@ fn prompt_sent(s: &mut State, result: Result<String, String>) {
             s.toast(format!("✓ sent to {label} · reply on {id}"));
         }
         Err(e) => {
-            if let Some((text, images)) = draft {
-                s.prompt.text = text;
-                s.prompt.images = images;
+            if let Some((text, mut images)) = draft {
+                if s.quitting {
+                    s.prompt.lost.push((text.clone(), e.clone()));
+                }
+                // Anything typed since goes after the message that came back.
+                let p = &mut s.prompt;
+                p.text = format!("{text} {}", p.text).trim_end().to_string();
+                images.append(&mut p.images);
+                p.images = images;
+                p.pick = Pick::None;
             }
             s.prompt.open = true;
             s.toast(format!("not sent: {e}"));
@@ -1035,6 +1066,7 @@ fn paste(s: &mut State, text: String, out: &mut Vec<Command>) {
             c => Key::Char(c),
         };
         key(s, k, out);
+        answer_box(s);
     }
 }
 
@@ -2326,6 +2358,125 @@ mod tests {
         assert_eq!(s.prompt.target.as_deref(), Some("o2"));
         load(&mut s, "gone");
         assert_eq!(s.prompt.target.as_deref(), Some("o1"));
+    }
+
+    #[test]
+    fn a_target_that_leaves_the_list_stays_chosen_and_nothing_goes_elsewhere() {
+        let mut s = prompting();
+        type_in(&mut s, "for the first one");
+        let reload = |s: &mut State, list: Vec<Session>| {
+            update(
+                s,
+                Event::SessionsLoaded {
+                    sessions: list,
+                    last: Some("o2".into()),
+                },
+                T0,
+            );
+        };
+        reload(&mut s, vec![session("o2", "ACME-1")]);
+        assert_eq!(s.prompt.target.as_deref(), Some("o1"));
+        assert!(s.prompt.target_session().is_none());
+        assert!(press(&mut s, Key::Enter).is_empty(), "nothing is sent");
+        assert_eq!(s.prompt.text, "for the first one");
+        press(&mut s, Key::Esc);
+        reload(&mut s, vec![session("o1", "the system")]);
+        assert_eq!(s.prompt.target_session().unwrap().owner, "o1");
+    }
+
+    #[test]
+    fn a_message_can_only_be_dropped_on_purpose_while_the_session_has_not_replied() {
+        let mut d = answer_card("D-5");
+        d.prompt = true;
+        d.discussion = vec![crate::queue::Entry {
+            at: "10:00".into(),
+            who: "you".into(),
+            text: "status?".into(),
+        }];
+        let mut s = loaded(vec![d.clone()]);
+        press(&mut s, Key::Enter);
+        assert_eq!(s.queue.len(), 1, "the first ⏎ only warns");
+        assert!(s.toast.as_ref().unwrap().0.contains("⏎ again drops"));
+        press(&mut s, Key::Enter);
+        assert!(s.queue.is_empty());
+
+        let mut s = loaded(vec![d.clone()]);
+        press(&mut s, Key::Enter);
+        press(&mut s, Key::Down);
+        press(&mut s, Key::Enter);
+        assert_eq!(s.queue.len(), 1, "any other key starts over");
+
+        d.discussion.push(crate::queue::Entry {
+            at: "10:01".into(),
+            who: "session".into(),
+            text: "fine".into(),
+        });
+        let mut s = loaded(vec![d]);
+        press(&mut s, Key::Enter);
+        assert!(s.queue.is_empty(), "after a reply it is an ordinary got it");
+    }
+
+    #[test]
+    fn a_failed_send_keeps_what_was_typed_since_and_closes_any_list() {
+        let mut s = prompting();
+        type_in(&mut s, "first");
+        press(&mut s, Key::Enter);
+        press(&mut s, Key::Tab);
+        type_in(&mut s, "much longer second text @");
+        assert!(matches!(s.prompt.pick, Pick::Files { .. }));
+        update(&mut s, Event::PromptSent(Err("disk full".into())), T0);
+        assert_eq!(s.prompt.text, "first much longer second text @");
+        assert_eq!(s.prompt.pick, Pick::None);
+        assert!(s.prompt.file_rows().is_empty());
+    }
+
+    #[test]
+    fn only_one_message_is_on_its_way_at_a_time() {
+        let mut s = prompting();
+        type_in(&mut s, "first");
+        press(&mut s, Key::Enter);
+        press(&mut s, Key::Tab);
+        type_in(&mut s, "second");
+        assert!(press(&mut s, Key::Enter).is_empty());
+        assert_eq!(s.prompt.text, "second");
+    }
+
+    #[test]
+    fn a_message_that_fails_as_the_deck_closes_is_kept_for_the_report() {
+        let mut s = prompting();
+        type_in(&mut s, "first");
+        press(&mut s, Key::Enter);
+        press(&mut s, Key::Char('q'));
+        assert!(s.quitting);
+        update(&mut s, Event::PromptSent(Err("disk full".into())), T0);
+        assert_eq!(
+            s.prompt.lost,
+            [("first".to_string(), "disk full".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_pasted_newline_in_the_follow_up_box_sends_and_the_rest_stays_text() {
+        let mut s = loaded(vec![answer_card("D-5")]);
+        let out = update(&mut s, Event::Paste("foo\nquery".into()), T0);
+        assert_eq!(
+            out,
+            [Command::Ask {
+                id: "D-5".into(),
+                text: "foo".into()
+            }]
+        );
+        assert_eq!(s.input.as_ref().unwrap().text, "query");
+        assert!(!s.quitting);
+    }
+
+    #[test]
+    fn a_typed_line_range_survives_picking_the_file() {
+        let mut s = prompting();
+        s.prompt.files = vec!["src/app.rs".into()];
+        type_in(&mut s, "@app#L10-20");
+        press(&mut s, Key::Enter);
+        assert_eq!(s.prompt.text, "@src/app.rs#L10-20 ");
     }
 
     #[test]

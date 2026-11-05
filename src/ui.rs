@@ -396,6 +396,7 @@ fn prompt_text(s: &State) -> Paragraph<'static> {
                 .bg(theme::SELECT)
                 .add_modifier(Modifier::BOLD),
         ),
+        None if p.target.is_some() => Span::styled(" session gone ", Style::new().fg(theme::RED)),
         None => Span::styled(" no session ", Style::new().fg(theme::MUTED)),
     };
     let typed = match &p.pick {

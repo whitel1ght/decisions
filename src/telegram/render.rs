@@ -168,7 +168,9 @@ pub fn header(d: &Decision, now_ms: i64) -> String {
         }
     }
     if let Some(at) = d.asked_ms() {
-        parts.push(if d.is_answer() {
+        parts.push(if d.prompt {
+            format!("sent {} ago", age_label(now_ms - at))
+        } else if d.is_answer() {
             format!("answered {} ago", age_label(now_ms - at))
         } else {
             format!("waiting {}", age_label(now_ms - at))
@@ -184,7 +186,7 @@ fn build(d: &Decision, now_ms: i64, ctx: Context, limit: usize) -> String {
         s.push('\n');
         s.push_str(&escape(&d.source));
     }
-    if d.is_answer() {
+    if d.is_answer() && !d.prompt {
         s.push_str(&format!("\n\n<b>you asked: {}</b>", escape(&d.question)));
     } else {
         s.push_str(&format!("\n\n<b>{}</b>", escape(&d.question)));

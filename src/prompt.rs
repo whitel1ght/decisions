@@ -42,6 +42,8 @@ fn git_files(cwd: &str) -> Option<Vec<String>> {
             "-C",
             cwd,
             "ls-files",
+            // Without -z git quotes and escapes any name that is not plain ASCII.
+            "-z",
             "--cached",
             "--others",
             "--exclude-standard",
@@ -52,7 +54,8 @@ fn git_files(cwd: &str) -> Option<Vec<String>> {
         .ok()?;
     out.status.success().then(|| {
         String::from_utf8_lossy(&out.stdout)
-            .lines()
+            .split('\0')
+            .filter(|f| !f.is_empty())
             .take(MAX_FILES)
             .map(String::from)
             .collect()
@@ -131,7 +134,14 @@ pub fn search(files: &[String], query: &str, limit: usize) -> Vec<String> {
     let query = query.split('#').next().unwrap_or(query).to_lowercase();
     let mut found: Vec<(usize, &String)> = files
         .iter()
-        .filter_map(|f| score(&f.to_lowercase(), &query).map(|s| (s, f)))
+        .filter_map(|f| {
+            let lower = f.to_lowercase();
+            // A directory just picked would come first and picking it again would do nothing.
+            if lower == query && lower.ends_with('/') {
+                return None;
+            }
+            score(&lower, &query).map(|s| (s, f))
+        })
         .collect();
     found.sort_by_key(|(s, f)| (*s, f.len(), f.as_str()));
     found
@@ -139,16 +149,6 @@ pub fn search(files: &[String], query: &str, limit: usize) -> Vec<String> {
         .take(limit)
         .map(|(_, f)| f.clone())
         .collect()
-}
-
-fn unquote(token: &str) -> String {
-    let t = token.trim();
-    let t = t
-        .strip_prefix('\'')
-        .and_then(|t| t.strip_suffix('\''))
-        .or_else(|| t.strip_prefix('"').and_then(|t| t.strip_suffix('"')))
-        .unwrap_or(t);
-    t.replace("\\ ", " ")
 }
 
 fn is_image(path: &Path) -> bool {
@@ -164,23 +164,22 @@ fn expand_home(path: String) -> PathBuf {
     }
 }
 
-/// Splits on whitespace, but not on an escaped space or inside quotes.
+/// Reads a paste as a shell would, since that is how a terminal escapes a dragged path: quotes and
+/// backslashes hold a name together. Only ASCII whitespace separates, because macOS puts U+202F in
+/// its screenshots' names.
 fn tokens(text: &str) -> Vec<String> {
     let (mut out, mut cur, mut quote, mut escaped) = (Vec::new(), String::new(), None, false);
     for c in text.chars() {
         if escaped {
-            cur.push('\\');
             cur.push(c);
             escaped = false;
-        } else if c == '\\' {
+        } else if c == '\\' && quote != Some('\'') {
             escaped = true;
         } else if quote == Some(c) {
             quote = None;
-            cur.push(c);
         } else if quote.is_none() && (c == '\'' || c == '"') {
             quote = Some(c);
-            cur.push(c);
-        } else if quote.is_none() && c.is_whitespace() {
+        } else if quote.is_none() && c.is_ascii_whitespace() {
             if !cur.is_empty() {
                 out.push(std::mem::take(&mut cur));
             }
@@ -200,7 +199,7 @@ pub fn pasted_images(text: &str) -> Option<Vec<Image>> {
     let found: Option<Vec<Image>> = tokens(text)
         .iter()
         .map(|t| {
-            let path = expand_home(unquote(t));
+            let path = expand_home(t.clone());
             if !is_image(&path) {
                 return None;
             }
@@ -382,6 +381,46 @@ mod tests {
         );
         assert_eq!(pasted_images(&format!("'{s}'")).unwrap()[0].path, spaced);
         assert_eq!(pasted_images(&format!("{p} '{s}'")).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_dragged_path_with_shell_escapes_or_a_screenshots_narrow_space_is_found() {
+        let d = temp("escapes");
+        let copy = d.join("image (1).png");
+        let shot = d.join("Screenshot at 9.41.05\u{202f}PM.png");
+        std::fs::write(&copy, "1").unwrap();
+        std::fs::write(&shot, "1").unwrap();
+        let escaped = copy
+            .display()
+            .to_string()
+            .replace(' ', "\\ ")
+            .replace('(', "\\(")
+            .replace(')', "\\)");
+        assert_eq!(pasted_images(&escaped).unwrap()[0].path, copy);
+        let raw = shot.display().to_string().replace(' ', "\\ ");
+        assert_eq!(pasted_images(&raw).unwrap()[0].path, shot);
+    }
+
+    #[test]
+    fn git_names_that_are_not_ascii_are_listed_as_they_are() {
+        let d = temp("git");
+        std::fs::create_dir_all(d.join("документы")).unwrap();
+        std::fs::write(d.join("документы/заметка.md"), "").unwrap();
+        let init = Command::new("git")
+            .args(["-C", d.to_str().unwrap(), "init", "-q"])
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let got = files(d.to_str().unwrap());
+        assert!(got.contains(&"документы/заметка.md".to_string()), "{got:?}");
+        assert!(got.contains(&"документы/".to_string()), "{got:?}");
+        assert_eq!(search(&got, "заметка", 1), ["документы/заметка.md"]);
+    }
+
+    #[test]
+    fn a_directory_just_picked_gives_way_to_what_is_inside_it() {
+        let files: Vec<String> = ["src/", "src/app.rs"].map(String::from).to_vec();
+        assert_eq!(search(&files, "src/", 9), ["src/app.rs"]);
     }
 
     #[test]

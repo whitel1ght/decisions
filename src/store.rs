@@ -157,7 +157,11 @@ impl Doc {
     }
 
     fn discuss(&mut self, who: &str, text: &str) -> Result<()> {
-        let text = one_line(text);
+        self.discuss_as_is(who, &one_line(text))
+    }
+
+    /// `text` must be one line already.
+    fn discuss_as_is(&mut self, who: &str, text: &str) -> Result<()> {
         if text.is_empty() {
             return fail("empty text");
         }
@@ -906,7 +910,9 @@ impl Store {
     /// the message as its first follow-up, so it travels like any other follow-up.
     pub fn add_prompt(&self, n: NewPrompt) -> Result<String> {
         let _lock = self.lock()?;
-        let (text, session) = (one_line(&n.text), one_line(&n.session));
+        // Line breaks go, other spacing stays: it may be part of an attached file's path.
+        let text = n.text.lines().collect::<Vec<_>>().join(" ");
+        let (text, session) = (text.trim(), one_line(&n.session));
         if text.is_empty() {
             return fail("the message is empty");
         }
@@ -923,8 +929,8 @@ impl Store {
         doc.set("kind", ANSWER);
         doc.set("origin", PROMPT);
         doc.set("session", session);
-        doc.set_section("Question", text.clone());
-        doc.discuss("you", &text)?;
+        doc.set_section("Question", one_line(text));
+        doc.discuss_as_is("you", text)?;
         write_atomic(&self.dir.join(format!("{id}.md")), &render(&doc))?;
         Ok(id)
     }
@@ -1814,6 +1820,14 @@ mod tests {
         s.reply(&id, "six of nine").unwrap();
         assert_eq!(s.list_json()[0]["followup"], "");
         assert!(s.seen(&id).is_ok());
+    }
+
+    #[test]
+    fn a_prompt_keeps_the_spacing_in_a_file_path() {
+        let s = store();
+        let text = "look [image: /a/two  spaces\u{202f}PM.png]";
+        s.add_prompt(prompt(text, "o1")).unwrap();
+        assert_eq!(s.list_json()[0]["followup"], text);
     }
 
     #[test]

@@ -15,6 +15,9 @@ pub struct Session {
     pub owner: String,
     /// The harness process: the MCP server's parent.
     pub pid: u32,
+    /// The MCP server that wrote this, so only it removes what it wrote.
+    #[serde(default)]
+    pub server: u32,
     pub client: String,
     pub cwd: String,
     #[serde(default)]
@@ -49,27 +52,31 @@ fn folder(dir: &Path) -> PathBuf {
     dir.join("sessions")
 }
 
-fn file(dir: &Path, owner: &str) -> PathBuf {
-    let safe: String = owner
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    folder(dir).join(format!("{safe}.json"))
+/// One file per harness process: two processes can share an owner id, as a pi started from a
+/// Claude session's shell inherits its id.
+fn file(dir: &Path, pid: u32) -> PathBuf {
+    folder(dir).join(format!("{pid}.json"))
 }
 
-/// Registers `session`; returns the file to remove when it ends.
+/// Registers `session`; returns the file to `unregister` when it ends.
 pub fn register(dir: &Path, session: &Session) -> Result<PathBuf, String> {
-    let path = file(dir, &session.owner);
+    let path = file(dir, session.pid);
     std::fs::create_dir_all(folder(dir)).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(session).map_err(|e| e.to_string())?;
     write_atomic(&path, &text).map_err(|e| e.0)?;
     Ok(path)
+}
+
+/// Removes `path` unless a newer server has written over it since: a restarted server can
+/// register before the old one exits.
+pub fn unregister(path: &Path, server: u32) {
+    let mine = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Session>(&t).ok())
+        .is_some_and(|s| s.server == server);
+    if mine {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn alive(pid: u32) -> bool {
@@ -182,20 +189,25 @@ pub fn running(dir: &Path) -> Vec<Session> {
 /// contains it.
 pub fn resolve<'a>(list: &'a [Session], query: &str) -> Result<&'a Session, String> {
     let q = query.trim().to_lowercase();
-    if let Some(s) = list
-        .iter()
-        .find(|s| s.owner == query.trim() || s.label().to_lowercase() == q)
-    {
+    if let Some(s) = list.iter().find(|s| s.owner == query.trim()) {
         return Ok(s);
     }
-    let found: Vec<&Session> = list.iter().filter(|s| matches(s, &q)).collect();
+    let named: Vec<&Session> = list
+        .iter()
+        .filter(|s| s.label().to_lowercase() == q)
+        .collect();
+    let found = if named.is_empty() {
+        list.iter().filter(|s| matches(s, &q)).collect()
+    } else {
+        named
+    };
     match found.as_slice() {
         [one] => Ok(one),
         [] => Err(format!("no running session matches {query}")),
         many => Err(format!(
-            "{query} matches {}",
+            "{query} matches {}; name one by its id",
             many.iter()
-                .map(|s| s.label())
+                .map(|s| format!("{} ({})", s.label(), s.owner))
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
@@ -245,9 +257,35 @@ mod tests {
     fn a_registered_session_is_listed_while_its_harness_runs() {
         let d = dir("alive");
         let me = session("a/b", std::process::id(), "pi", "/x/dotfiles");
-        let path = register(&d, &me).unwrap();
-        assert_eq!(path.file_name().unwrap(), "a_b.json");
+        register(&d, &me).unwrap();
         assert_eq!(registered(&d), vec![me]);
+    }
+
+    #[test]
+    fn two_harnesses_sharing_an_owner_id_each_keep_their_row() {
+        let d = dir("shared");
+        let first = session("same", std::process::id(), "claude-code", "/x");
+        let second = session("same", std::os::unix::process::parent_id(), "pi", "/x");
+        register(&d, &first).unwrap();
+        let path = register(&d, &second).unwrap();
+        assert_eq!(registered(&d).len(), 2);
+        unregister(&path, second.server);
+        assert_eq!(registered(&d), vec![first]);
+    }
+
+    #[test]
+    fn a_server_leaves_the_file_of_the_newer_server_that_replaced_it() {
+        let d = dir("restart");
+        let mut old = session("o", std::process::id(), "pi", "/x");
+        old.server = 111;
+        let path = register(&d, &old).unwrap();
+        let mut new = old.clone();
+        new.server = 222;
+        register(&d, &new).unwrap();
+        unregister(&path, 111);
+        assert_eq!(registered(&d), vec![new]);
+        unregister(&path, 222);
+        assert!(registered(&d).is_empty());
     }
 
     #[test]
@@ -310,6 +348,17 @@ mod tests {
         assert_eq!(resolve(&list, "backend").unwrap().owner, "o2");
         assert!(resolve(&list, "back").unwrap_err().contains("matches"));
         assert!(resolve(&list, "nope").unwrap_err().contains("no running"));
+    }
+
+    #[test]
+    fn two_sessions_with_the_same_name_are_never_guessed_between() {
+        let list = [
+            session("o1", 1, "pi", "/x/dotfiles"),
+            session("o2", 2, "pi", "/y/dotfiles"),
+        ];
+        let err = resolve(&list, "dotfiles").unwrap_err();
+        assert!(err.contains("o1") && err.contains("o2"), "{err}");
+        assert_eq!(resolve(&list, "o2").unwrap().owner, "o2");
     }
 
     #[test]

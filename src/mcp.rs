@@ -139,6 +139,7 @@ impl<W: Write> Server<W> {
             return;
         };
         session.client = client.to_string();
+        session.server = std::process::id();
         if let (Ok(path), Ok(mut done)) =
             (sessions::register(&dir, &session), self.registered.lock())
         {
@@ -148,7 +149,7 @@ impl<W: Write> Server<W> {
 
     fn unregister(&self) {
         if let Some(path) = self.registered.lock().ok().and_then(|mut r| r.take()) {
-            let _ = std::fs::remove_file(path);
+            sessions::unregister(&path, std::process::id());
         }
     }
 
