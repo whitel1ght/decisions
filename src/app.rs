@@ -250,8 +250,6 @@ pub struct State {
     pub ask_failed: HashMap<String, AskFailed>,
     pub notes: HashMap<String, String>,
     pub input: Option<Input>,
-    /// The answer card whose follow-up box Esc closed; it stays closed until the card changes.
-    pub box_closed: Option<String>,
     pub help: bool,
     /// The stats screen, while it is open.
     pub stats: Option<Stats>,
@@ -299,11 +297,6 @@ impl State {
 
     pub fn current(&self) -> Option<&Decision> {
         self.queue.get(self.cur)
-    }
-
-    /// `id` is an answer card in the queue: an ask on it is a follow-up.
-    pub fn is_answer_card(&self, id: &str) -> bool {
-        self.queue.iter().any(|d| d.id == id && d.is_answer())
     }
 
     pub fn age_ms(&self, d: &Decision) -> i64 {
@@ -358,41 +351,7 @@ pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
         }
         Event::Key(k) => key(s, k, &mut out),
     }
-    answer_box(s);
     out
-}
-
-/// An answer card in front always has its follow-up box open: type to follow up, ⏎ on an
-/// empty box is got it, ↑/↓ change cards, Esc leaves it for the deck keys until the card
-/// changes. It waits while a thrown card can still be undone, so u and n keep working.
-fn answer_box(s: &mut State) {
-    if let Some(Input {
-        kind: InputKind::Ask { id },
-        text,
-    }) = &s.input
-        && text.is_empty()
-        && s.current().map(|d| &d.id) != Some(id)
-        && !s.queue.iter().any(|d| &d.id == id && !d.is_answer())
-    {
-        s.input = None;
-    }
-    let Some(id) = s.current().filter(|d| d.is_answer()).map(|d| d.id.clone()) else {
-        s.box_closed = None;
-        return;
-    };
-    if s.box_closed.as_ref().is_some_and(|c| c != &id) {
-        s.box_closed = None;
-    }
-    let busy = s.input.is_some()
-        || s.prompt.open
-        || s.pending.is_some()
-        || s.help
-        || s.stats.is_some()
-        || s.quitting
-        || s.side != Side::Front;
-    if !busy && s.box_closed.is_none() {
-        ask(s);
-    }
 }
 
 fn tick(s: &mut State, out: &mut Vec<Command>) {
@@ -491,7 +450,7 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         return prompt_key(s, k, out);
     }
     if k == Key::Tab && !s.help && s.stats.is_none() {
-        return open_prompt(s, out);
+        return message_session(s, out);
     }
     if s.input.is_some() {
         return input_key(s, k, out);
@@ -513,7 +472,7 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         Key::Char(c @ '1'..='9') => choose(s, c as u8 - b'0', out),
         Key::Char('u') => undo(s),
         Key::Char('n') => note(s),
-        Key::Char('a') => ask(s),
+        Key::Char('a') => ask(s, out),
         Key::Char('o') => open(s, out),
         Key::Char('r') => out.push(Command::Reload),
         Key::Char('?') => s.help = true,
@@ -528,6 +487,14 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
 
 /// On the front, j/k (and the arrows) move between the card's options; J/K change cards.
 fn front_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
+    if s.current().is_some_and(|d| d.is_answer()) {
+        // An answer card has no options to move between.
+        match k {
+            Key::Char('j') | Key::Down => return go(s, s.cur + 1),
+            Key::Char('k') | Key::Up => return go(s, s.cur.saturating_sub(1)),
+            _ => {}
+        }
+    }
     match k {
         Key::Char('j' | 'k' | 'g' | 'G') | Key::Down | Key::Up => {
             let Some(d) = s.current() else { return };
@@ -631,13 +598,13 @@ fn to_front(s: &mut State, id: &str) {
     }
 }
 
-/// On an answer card the actions are ⏎ (seen) and a (follow up); other answering keys say so.
+/// On an answer card the actions are ⏎ (seen) and tab (a message); other answering keys say so.
 fn answer_card_hint(s: &mut State) -> bool {
     let Some(id) = s.current().filter(|d| d.is_answer()).map(|d| d.id.clone()) else {
         return false;
     };
     s.toast(format!(
-        "{id} is an answer to your question: ⏎ got it · a follow up"
+        "{id} is an answer to your question: ⏎ got it · tab message its session"
     ));
     true
 }
@@ -770,9 +737,11 @@ fn note(s: &mut State) {
     }
 }
 
-/// a: ask the session back, or on an answer card, follow up on its answer.
-fn ask(s: &mut State) {
-    s.box_closed = None;
+/// a: ask the session back. An answer card waits on nothing, so it takes a message instead.
+fn ask(s: &mut State, out: &mut Vec<Command>) {
+    if s.current().is_some_and(|d| d.is_answer()) {
+        return message_session(s, out);
+    }
     if let Some(id) = s.current().map(|d| d.id.clone()) {
         let text = s
             .ask_failed
@@ -784,6 +753,20 @@ fn ask(s: &mut State) {
             text,
         });
     }
+}
+
+/// The prompt line, aimed at the session that wrote the answer card in front. A draft keeps its
+/// session, as does a message on its way, whose failure brings it back as the draft.
+fn message_session(s: &mut State, out: &mut Vec<Command>) {
+    let idle = s.prompt.text.is_empty() && s.prompt.images.is_empty() && s.prompt.sending.is_none();
+    if idle
+        && let Some(d) = s
+            .current()
+            .filter(|d| d.is_answer() && !d.session.is_empty())
+    {
+        s.prompt.target = Some(d.session.clone());
+    }
+    open_prompt(s, out);
 }
 
 /// Tab, or `decisions --prompt`: the prompt line opens with its draft and its last session.
@@ -1060,7 +1043,6 @@ fn paste(s: &mut State, text: String, out: &mut Vec<Command>) {
             c => Key::Char(c),
         };
         key(s, k, out);
-        answer_box(s);
     }
 }
 
@@ -1068,32 +1050,14 @@ fn input_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
     let Some(input) = s.input.as_mut() else {
         return;
     };
-    let on_answer = match &input.kind {
-        InputKind::Ask { id } => s.queue.iter().any(|d| &d.id == id && d.is_answer()),
-        _ => false,
-    };
     match k {
         Key::Char(c) => input.text.push(c),
         Key::Space => input.text.push(' '),
         Key::Backspace => {
             input.text.pop();
         }
-        Key::Down | Key::Up if on_answer && input.text.trim().is_empty() => {
-            let to = if k == Key::Down {
-                s.cur + 1
-            } else {
-                s.cur.saturating_sub(1)
-            };
-            if to < s.queue.len() && to != s.cur {
-                s.input = None;
-                go(s, to);
-            }
-        }
         Key::Esc => {
             let was_note = input.kind == InputKind::Note;
-            if on_answer && let InputKind::Ask { id } = &input.kind {
-                s.box_closed = Some(id.clone());
-            }
             s.input = None;
             if was_note && let Some(p) = s.pending.as_mut() {
                 p.paused = false;
@@ -1134,20 +1098,13 @@ fn input_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
                     }
                 }
                 InputKind::Ask { id } => {
-                    if text.is_empty() && on_answer && s.current().is_some_and(|d| d.id == id) {
-                        return enter(s, out);
-                    }
                     if !text.is_empty() {
                         out.push(Command::Ask {
                             id: id.clone(),
                             text: text.clone(),
                         });
                         s.asking.insert(id.clone(), text);
-                        s.toast(if s.is_answer_card(&id) {
-                            format!("following up on {id}…")
-                        } else {
-                            format!("asking {id}…")
-                        });
+                        s.toast(format!("asking {id}…"));
                     }
                 }
             }
@@ -1168,14 +1125,7 @@ fn sent(
         match result {
             Ok(warning) => {
                 s.ask_failed.remove(&id);
-                // A follow-up may have taken its card off the stack already.
-                let question = s.queue.iter().any(|d| d.id == id && !d.is_answer());
-                let done = if question {
-                    format!("asked {id}")
-                } else {
-                    format!("follow-up sent · {id} comes back with the reply")
-                };
-                s.toast(warning.unwrap_or(done));
+                s.toast(warning.unwrap_or(format!("asked {id}")));
             }
             Err(error) => {
                 if let Some(input) = s.input.as_mut()
@@ -1580,87 +1530,34 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_card_opens_with_its_follow_up_box_and_keys_type_into_it() {
-        let mut s = loaded(vec![answer_card("D-5"), fixture()[0].clone()]);
-        assert_eq!(
-            s.input.as_ref().unwrap().kind,
-            InputKind::Ask { id: "D-5".into() }
-        );
-        for k in [
-            Key::Char('J'),
-            Key::Char('1'),
-            Key::Char('n'),
-            Key::Char('q'),
-        ] {
-            assert!(press(&mut s, k).is_empty(), "{k:?}");
-        }
-        assert_eq!(s.input.as_ref().unwrap().text, "J1nq");
-        assert_eq!(ids(&s), ["D-5", "D-1"]);
-        press(&mut s, Key::Down);
-        assert_eq!(s.cur, 0, "↓ keeps a written follow-up on its card");
-    }
-
-    #[test]
-    fn arrows_change_cards_from_an_empty_box_and_it_follows_the_card() {
+    fn an_answer_card_takes_the_deck_keys() {
         let mut s = loaded(vec![
             answer_card("D-5"),
             answer_card("D-6"),
             fixture()[0].clone(),
         ]);
-        press(&mut s, Key::Down);
-        assert_eq!(s.current().unwrap().id, "D-6");
-        assert_eq!(
-            s.input.as_ref().unwrap().kind,
-            InputKind::Ask { id: "D-6".into() }
-        );
-        press(&mut s, Key::Down);
-        assert_eq!(s.current().unwrap().id, "D-1");
-        assert!(s.input.is_none(), "a question card has no follow-up box");
-        press(&mut s, Key::Char('K'));
-        assert_eq!(
-            s.input.as_ref().unwrap().kind,
-            InputKind::Ask { id: "D-6".into() }
-        );
-        press(&mut s, Key::Up);
-        assert_eq!(s.current().unwrap().id, "D-5");
-    }
-
-    #[test]
-    fn esc_closes_the_box_for_the_deck_keys_until_the_card_changes_and_a_reopens_it() {
-        let mut s = loaded(vec![answer_card("D-5"), answer_card("D-6")]);
-        press(&mut s, Key::Esc);
         assert!(s.input.is_none());
-        update(&mut s, Event::Tick, T0 + 1);
-        assert!(s.input.is_none(), "stays closed on the same card");
-        press(&mut s, Key::Char('J'));
+        press(&mut s, Key::Down);
         assert_eq!(s.current().unwrap().id, "D-6");
-        assert!(s.input.is_some(), "the next card opens with its box");
-        press(&mut s, Key::Esc);
-        press(&mut s, Key::Char('a'));
-        assert_eq!(s.input.as_ref().unwrap().text, "");
-    }
-
-    #[test]
-    fn the_box_waits_out_the_undo_window_so_u_still_undoes() {
-        let mut s = loaded(vec![answer_card("D-5"), answer_card("D-6")]);
+        press(&mut s, Key::Char('k'));
+        assert_eq!(s.current().unwrap().id, "D-5");
+        press(&mut s, Key::Up);
+        assert_eq!(s.current().unwrap().id, "D-5", "already the first");
+        press(&mut s, Key::Char('J'));
+        press(&mut s, Key::Char('j'));
+        assert_eq!(s.current().unwrap().id, "D-1");
+        press(&mut s, Key::Char('K'));
         press(&mut s, Key::Enter);
-        assert_eq!(ids(&s), ["D-6"]);
-        assert!(s.input.is_none(), "u and n still act in the undo window");
+        assert_eq!(ids(&s), ["D-5", "D-1"], "⏎ on the card is got it");
         press(&mut s, Key::Char('u'));
-        assert_eq!(ids(&s), ["D-5", "D-6"]);
-        assert!(s.input.is_some());
-        press(&mut s, Key::Enter);
-        update(&mut s, Event::Tick, T0 + UNDO_MS);
-        assert_eq!(
-            s.input.as_ref().unwrap().kind,
-            InputKind::Ask { id: "D-6".into() }
-        );
+        assert_eq!(ids(&s), ["D-6", "D-5", "D-1"], "u brings it back");
+        press(&mut s, Key::Char('q'));
+        assert!(s.quitting);
     }
 
     #[test]
     fn numbers_and_notes_only_hint_on_an_answer_card() {
         let mut s = loaded(vec![answer_card("D-5")]);
-        press(&mut s, Key::Esc);
         for k in [Key::Char('1'), Key::Char('2'), Key::Char('n')] {
             assert!(press(&mut s, k).is_empty(), "{k:?}");
             assert!(s.input.is_none(), "{k:?} opened an input");
@@ -1668,59 +1565,7 @@ mod tests {
         }
         assert_eq!(
             s.toast.as_ref().unwrap().0,
-            "D-5 is an answer to your question: ⏎ got it · a follow up"
-        );
-    }
-
-    #[test]
-    fn a_follows_up_on_an_answer_card_and_the_card_stays() {
-        let mut s = loaded(vec![answer_card("D-5"), fixture()[0].clone()]);
-        type_text(&mut s, "is it flaky on main too?");
-        assert_eq!(
-            press(&mut s, Key::Enter),
-            [Command::Ask {
-                id: "D-5".into(),
-                text: "is it flaky on main too?".into()
-            }]
-        );
-        assert_eq!(s.toast.as_ref().unwrap().0, "following up on D-5…");
-        assert!(s.pending.is_none(), "a follow-up does not mark it seen");
-        assert_eq!(
-            s.input.as_ref().map(|i| (&i.kind, i.text.as_str())),
-            Some((&InputKind::Ask { id: "D-5".into() }, "")),
-            "the box is open again for the next follow-up"
-        );
-        update(&mut s, sent("D-5", true, Ok(())), T0);
-        assert_eq!(
-            s.toast.as_ref().unwrap().0,
-            "follow-up sent · D-5 comes back with the reply"
-        );
-        assert_eq!(ids(&s), ["D-5", "D-1"]);
-        let mut after = answer_card("D-5");
-        after.discussion = vec![crate::queue::Entry {
-            at: String::new(),
-            who: "you".into(),
-            text: "is it flaky on main too?".into(),
-        }];
-        update(
-            &mut s,
-            Event::Loaded(Ok(vec![after, fixture()[0].clone()])),
-            T0,
-        );
-        assert_eq!(s.current().unwrap().discussion[0].who, "you");
-    }
-
-    #[test]
-    fn a_failed_follow_up_keeps_its_text_for_the_retry() {
-        let mut s = loaded(vec![answer_card("D-5")]);
-        type_text(&mut s, "and on main?");
-        press(&mut s, Key::Enter);
-        update(&mut s, sent("D-5", true, Err("disk full")), T0);
-        assert_eq!(s.ask_failed["D-5"].error, "disk full");
-        assert_eq!(
-            s.input.as_ref().unwrap().text,
-            "and on main?",
-            "the open box gets the failed text back for ⏎ to retry"
+            "D-5 is an answer to your question: ⏎ got it · tab message its session"
         );
     }
 
@@ -2320,18 +2165,84 @@ mod tests {
         assert_eq!(s.prompt.images.len(), 1);
     }
 
+    fn sessions_arrive(s: &mut State) {
+        update(
+            s,
+            Event::SessionsLoaded {
+                sessions: vec![session("o1", "a"), session("o2", "b")],
+                last: Some("o1".into()),
+            },
+            T0,
+        );
+    }
+
+    fn written_by(id: &str, owner: &str) -> Decision {
+        let mut d = answer_card(id);
+        d.session = owner.into();
+        d
+    }
+
     #[test]
-    fn tab_opens_the_line_over_an_answer_cards_follow_up_box() {
-        let mut s = loaded(vec![answer_card("D-5")]);
-        press(&mut s, Key::Char('x'));
-        assert_eq!(s.input.as_ref().unwrap().text, "x");
+    fn tab_and_a_on_an_answer_card_aim_at_the_session_that_wrote_it() {
+        for k in [Key::Tab, Key::Char('a')] {
+            let mut s = loaded(vec![written_by("D-5", "o2")]);
+            assert_eq!(press(&mut s, k), [Command::LoadSessions]);
+            assert!(s.prompt.open && s.input.is_none());
+            sessions_arrive(&mut s);
+            assert_eq!(s.prompt.target.as_deref(), Some("o2"), "not the last used");
+        }
+    }
+
+    #[test]
+    fn a_question_card_keeps_the_last_session_and_a_asks_back() {
+        let mut s = loaded(fixture());
         press(&mut s, Key::Tab);
-        type_in(&mut s, "yz");
-        assert_eq!(s.prompt.text, "yz");
-        assert_eq!(s.input.as_ref().unwrap().text, "x");
+        sessions_arrive(&mut s);
+        assert_eq!(s.prompt.target.as_deref(), Some("o1"));
         press(&mut s, Key::Esc);
-        press(&mut s, Key::Char('w'));
-        assert_eq!(s.input.as_ref().unwrap().text, "xw");
+        press(&mut s, Key::Char('a'));
+        assert!(!s.prompt.open);
+        assert_eq!(
+            s.input.as_ref().unwrap().kind,
+            InputKind::Ask { id: "D-1".into() }
+        );
+    }
+
+    #[test]
+    fn an_answer_card_with_no_session_leaves_the_target_alone() {
+        let mut s = loaded(vec![answer_card("D-5")]);
+        press(&mut s, Key::Tab);
+        sessions_arrive(&mut s);
+        assert_eq!(s.prompt.target.as_deref(), Some("o1"));
+    }
+
+    #[test]
+    fn a_draft_is_not_moved_to_the_card_in_front() {
+        let mut s = loaded(vec![fixture()[0].clone(), written_by("D-5", "o2")]);
+        press(&mut s, Key::Tab);
+        sessions_arrive(&mut s);
+        type_in(&mut s, "half a thought");
+        press(&mut s, Key::Esc);
+        press(&mut s, Key::Char('J'));
+        press(&mut s, Key::Tab);
+        assert_eq!(s.prompt.target.as_deref(), Some("o1"));
+
+        s.prompt.text.clear();
+        press(&mut s, Key::Esc);
+        press(&mut s, Key::Tab);
+        assert_eq!(s.prompt.target.as_deref(), Some("o2"), "nothing to move");
+    }
+
+    #[test]
+    fn a_message_on_its_way_keeps_its_session() {
+        let mut s = loaded(vec![fixture()[0].clone(), written_by("D-5", "o2")]);
+        press(&mut s, Key::Tab);
+        sessions_arrive(&mut s);
+        type_in(&mut s, "first");
+        press(&mut s, Key::Enter);
+        press(&mut s, Key::Char('J'));
+        press(&mut s, Key::Tab);
+        assert_eq!(s.prompt.target.as_deref(), Some("o1"));
     }
 
     #[test]
@@ -2408,33 +2319,6 @@ mod tests {
     }
 
     #[test]
-    fn after_a_follow_up_the_next_words_go_to_the_next_card() {
-        let mut d = answer_card("D-5");
-        let mut s = loaded(vec![d.clone(), answer_card("D-6")]);
-        update(&mut s, Event::Tick, T0);
-        type_in(&mut s, "and the tests?");
-        press(&mut s, Key::Enter);
-        d.waiting = true;
-        update(
-            &mut s,
-            Event::Loaded(Ok(vec![d.clone(), answer_card("D-6")])),
-            T0,
-        );
-        assert_eq!(s.current().unwrap().id, "D-6");
-        let input = s.input.as_ref().expect("the next card's box is open");
-        assert_eq!(input.kind, InputKind::Ask { id: "D-6".into() });
-
-        let mut s = loaded(vec![answer_card("D-5")]);
-        update(&mut s, Event::Tick, T0);
-        type_in(&mut s, "and the tests?");
-        press(&mut s, Key::Enter);
-        update(&mut s, Event::Loaded(Ok(vec![d])), T0);
-        assert!(s.input.is_none(), "an empty deck takes its keys again");
-        press(&mut s, Key::Char('q'));
-        assert!(s.quitting);
-    }
-
-    #[test]
     fn a_card_back_with_no_reply_is_filed_by_one_enter() {
         let mut d = answer_card("D-5");
         d.prompt = true;
@@ -2449,7 +2333,7 @@ mod tests {
     }
 
     #[test]
-    fn a_followed_up_card_leaving_the_stack_was_not_closed_elsewhere() {
+    fn a_card_going_off_the_stack_to_wait_was_not_closed_elsewhere() {
         let mut d = answer_card("D-5");
         let mut s = loaded(vec![d.clone(), answer_card("D-6")]);
         s.side = Side::Back;
@@ -2496,21 +2380,6 @@ mod tests {
             s.prompt.lost,
             [("first".to_string(), "disk full".to_string())]
         );
-    }
-
-    #[test]
-    fn a_pasted_newline_in_the_follow_up_box_sends_and_the_rest_stays_text() {
-        let mut s = loaded(vec![answer_card("D-5")]);
-        let out = update(&mut s, Event::Paste("foo\nquery".into()), T0);
-        assert_eq!(
-            out,
-            [Command::Ask {
-                id: "D-5".into(),
-                text: "foo".into()
-            }]
-        );
-        assert_eq!(s.input.as_ref().unwrap().text, "query");
-        assert!(!s.quitting);
     }
 
     #[test]

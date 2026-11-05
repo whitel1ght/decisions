@@ -608,6 +608,7 @@ impl Store {
             kind: d.get("kind").into(),
             prompt: d.get("origin") == PROMPT,
             waiting: false,
+            session: d.get("session").into(),
             question: one_line(d.section("Question")),
             asked: d.get("asked").into(),
             blocks: d.get("blocks").into(),
@@ -688,7 +689,6 @@ impl Store {
                 .map(|d| {
                     let mut v = serde_json::to_value(self.summary(d)).expect("json");
                     v["age"] = json!(age(d.get("asked")));
-                    v["session"] = json!(d.get("session"));
                     v["discussion_count"] = json!(discussion(d.section("Discussion")).len());
                     v["followup"] = json!(d.followup());
                     v

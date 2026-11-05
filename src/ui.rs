@@ -40,7 +40,7 @@ const KEYS: &[(&str, &str)] = &[
     ("g / G", "first / last option (back: top / bottom)"),
     ("1-9", "answer with that option"),
     ("⏎", "option under the cursor, else {star}"),
-    ("⏎ on {answer}", "got it (with the follow-up box empty)"),
+    ("⏎ on {answer}", "got it"),
     ("↑ / ↓", "same as j / k"),
     ("space", "flip: context and discussion"),
     ("^d / ^u", "page the back"),
@@ -48,7 +48,7 @@ const KEYS: &[(&str, &str)] = &[
     ("n", "note on the card, or on the last answer"),
     ("last row", "something else: tell the agent in your words"),
     ("a", "ask the session back"),
-    ("{answer} typing", "follow up; esc closes the box, a opens"),
+    ("a on {answer}", "message the session that wrote it"),
     (
         "tab",
         "message a running session; @ file, # session, ^v image",
@@ -193,9 +193,6 @@ fn footer(s: &State) -> String {
             InputKind::Note => "⏎ send with note · esc no note",
             InputKind::CardNote { .. } => "⏎ attach the note (empty removes it) · esc cancel",
             InputKind::Tell { .. } => "⏎ answer in your own words · esc cancel",
-            InputKind::Ask { id } if s.is_answer_card(id) => {
-                "type a follow-up · ⏎ send (empty: got it) · ↑↓ cards · esc deck keys · tab prompt"
-            }
             InputKind::Ask { .. } => "⏎ ask · esc cancel",
         },
         (None, true, ..) => "any key closes help",
@@ -205,7 +202,7 @@ fn footer(s: &State) -> String {
         }
         (None, false, Side::Front, Some(_)) => "u undo · n note · J/K cards · 1-9 answer · ? help",
         (None, false, Side::Front, None) if s.current().is_some_and(|d| d.is_answer()) => {
-            "J/K cards · ⏎ got it · a follow up · space full answer · ? help · tab prompt"
+            "J/K cards · ⏎ got it · tab message its session · space full answer · ? help"
         }
         (None, false, Side::Front, None) => {
             "J/K cards · j/k options · 1-9 answer · ⏎ pick · space flip · ? help · tab prompt"
@@ -322,10 +319,9 @@ fn card_block(color: Color) -> Block<'static> {
         .style(Style::new().bg(theme::BG))
 }
 
-fn input_label(s: &State, kind: &InputKind) -> String {
+fn input_label(kind: &InputKind) -> String {
     match kind {
         InputKind::Note => "note".into(),
-        InputKind::Ask { id } if s.is_answer_card(id) => format!("follow up {id}"),
         InputKind::Ask { id } => format!("ask {id}"),
         InputKind::CardNote { id } => format!("note for {id}"),
         InputKind::Tell { id } => format!("tell {id}"),
@@ -377,7 +373,7 @@ fn input_box(f: &mut Frame, s: &State, rect: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme::LAVENDER))
         .title(Span::styled(
-            format!(" {} ", input_label(s, &i.kind)),
+            format!(" {} ", input_label(&i.kind)),
             Style::new()
                 .fg(theme::LAVENDER)
                 .add_modifier(Modifier::BOLD),
@@ -715,13 +711,6 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
     if let Some(fl) = s.failed.get(&d.id) {
         lines.push(Line::styled(
             format!("send failed: {} · ⏎ retries", fl.error),
-            Style::new().fg(theme::RED),
-        ));
-        lines.push(Line::default());
-    }
-    if let Some(af) = s.ask_failed.get(&d.id) {
-        lines.push(Line::styled(
-            format!("ask failed: {} · ⏎ retries", af.error),
             Style::new().fg(theme::RED),
         ));
         lines.push(Line::default());
@@ -1337,11 +1326,11 @@ mod tests {
             .join("\n\n");
         let mut s = state(vec![d], T0);
         s.input = Some(app::Input {
-            kind: InputKind::Ask { id: "D-5".into() },
+            kind: InputKind::Note,
             text: "more".into(),
         });
         let (buf, d) = render(&s, 80, 24);
-        let (_, y) = input_box_in(&buf, d.areas.card, "follow up D-5");
+        let (_, y) = input_box_in(&buf, d.areas.card, "note");
         let (_, cut) = find(&buf, "… space: the full answer");
         let (_, got) = find(&buf, "⏎  Got it");
         assert!(cut < got && got < y, "{}", screen(&buf));
@@ -1439,7 +1428,8 @@ mod tests {
         assert!(
             all.contains("undo the last answer")
                 && all.contains("ask the session back")
-                && all.contains("✉ typing follow up; esc closes the box, a opens"),
+                && all.contains("a on ✉")
+                && all.contains("message the session that wrote it"),
             "{all}"
         );
     }
@@ -1619,8 +1609,7 @@ mod tests {
             "A flaky e2e test.",
             "It passed on the retry.",
             "⏎  Got it",
-            "follow up D-5",
-            "type a follow-up · ⏎ send (empty: got it) · ↑↓ cards · esc deck keys",
+            "J/K cards · ⏎ got it · tab message its session · space full answer · ? help",
         ] {
             assert!(all.contains(want), "{want:?} missing:\n{all}");
         }
@@ -1714,41 +1703,6 @@ mod tests {
     }
 
     #[test]
-    fn the_follow_up_box_names_the_card_and_the_footer_says_send() {
-        let mut s = state(vec![answer_card()], T0);
-        typed(&mut s, "and on main?");
-        let (buf, d) = render(&s, 80, 24);
-        input_box_in(&buf, d.areas.card, "follow up D-5");
-        let all = screen(&buf);
-        assert!(all.contains("and on main?▏"), "{all}");
-        assert!(
-            all.contains("type a follow-up · ⏎ send (empty: got it) · ↑↓ cards · esc deck keys"),
-            "{all}"
-        );
-        assert!(all.contains("⏎  Got it"), "{all}");
-        app::update(&mut s, Event::Key(Key::Esc), T0);
-        let all = screen(&render(&s, 80, 24).0);
-        assert!(
-            all.contains("J/K cards · ⏎ got it · a follow up · space full answer · ? help"),
-            "after esc the deck keys are back: {all}"
-        );
-    }
-
-    #[test]
-    fn a_failed_follow_up_shows_on_the_answer_card() {
-        let mut s = state(vec![answer_card()], T0);
-        s.ask_failed.insert(
-            "D-5".into(),
-            app::AskFailed {
-                text: "and on main?".into(),
-                error: "boom".into(),
-            },
-        );
-        let all = screen(&render(&s, 80, 24).0);
-        assert!(all.contains("ask failed: boom · ⏎ retries"), "{all}");
-    }
-
-    #[test]
     fn nerd_icons_replace_the_text_ones() {
         let nerd = |list: Vec<Decision>| {
             let mut s = state(list, T0 + 13 * MIN);
@@ -1772,7 +1726,7 @@ mod tests {
             "\u{f040} note: use staging",
             "\u{f040} 4  Something else… tell the agent",
             "else \u{f005}",
-            "\u{f0e0} typing",
+            "a on \u{f0e0}",
             "D-5 · pi · repo · \u{f0e0} answer",
             "\u{f252} no reply from the session yet",
         ] {

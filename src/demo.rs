@@ -64,6 +64,7 @@ fn card(
         kind: String::new(),
         prompt: false,
         waiting: false,
+        session: String::new(),
         question: question.into(),
         asked: iso(asked),
         blocks: blocks.into(),
@@ -192,9 +193,10 @@ impl Demo {
             None,
             "You asked this while the session was busy with a review. **A flaky e2e test**: \
              `RetrieveV2ItemSpec` timed out once and passed on the retry.\n\n\
-             An answer card has no options: ⏎ marks it seen, a follows up.",
+             An answer card has no options: ⏎ marks it seen, tab messages its session.",
         );
         answer.kind = "answer".into();
+        answer.session = "demo-1".into();
         answer.source = "claude-code · acme-backend".into();
         answer.discussion = vec![
             entry("you", "Is it flaky on main too?"),
@@ -466,7 +468,7 @@ impl Backend for Demo {
         Err("demo: no clipboard here".into())
     }
 
-    fn prompt(&self, _session: &str, source: &str, text: &str) -> Result<String, String> {
+    fn prompt(&self, session: &str, source: &str, text: &str) -> Result<String, String> {
         let mut s = self
             .state
             .lock()
@@ -482,6 +484,7 @@ impl Backend for Demo {
             kind: "answer".into(),
             prompt: true,
             waiting: true,
+            session: session.into(),
             question: text.into(),
             asked: chrono::Local::now().to_rfc3339(),
             blocks: String::new(),

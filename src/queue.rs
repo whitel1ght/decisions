@@ -45,6 +45,9 @@ pub struct Decision {
     /// Nothing to do on it until its running session replies, so it stays out of the stack.
     #[serde(default, skip_serializing)]
     pub waiting: bool,
+    /// The session that wrote it, or that a message on it went to.
+    #[serde(default)]
+    pub session: String,
     pub question: String,
     pub asked: String,
     #[serde(default)]

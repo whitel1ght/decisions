@@ -99,13 +99,12 @@ and its answer, no options, after the questions in the deck (`✉ answer` on the
 in the header, `✉ N` on the badge). `⏎` marks it seen and files it away (5 s to undo); in
 Telegram it comes with one `✓ Got it` button. `tell_user` returns at once: nothing waits on it.
 
-The card records the session that wrote it (`session:`), so you can follow up while it is open:
-in the deck just type, since an answer card always has its follow-up box open (⏎ sends, ⏎ on an
-empty box is got it, ↑/↓ change cards, Esc leaves the box for the deck keys and `a` brings it
-back); a text reply to the card in Telegram; or
-`decisions ask D-7 "and the tests?"`. The follow-up goes back to that session, which answers
-with `reply` on the same card; the thread shows under the answer. Neither closes it; marking it
-seen does.
+The card records the session that wrote it (`session:`). To say more in the deck, press `Tab` or
+`a` on the card: the prompt line opens aimed at that session, and the reply comes as a new card
+(see below). In Telegram, which has no prompt line, a text reply to the card follows up, as does
+`decisions ask D-7 "and the tests?"`. A follow-up goes back to that session, which answers with
+`reply` on the same card; the thread shows under the answer. Neither closes it; marking it seen
+does.
 
 While that session runs and has not replied, there is nothing for you to do on the card, so it
 leaves the stack and the badge, the deck's header counts it (`⧗ 1 sent`), and it returns with the
@@ -122,7 +121,8 @@ while the deck stays open.
 
 - **Pick the session:** `#` as the first character, or `Tab` again, lists the running sessions with
   their harness, directory and state; type to filter, `1-9` or `⏎` to pick. The last one is
-  remembered.
+  remembered, except that on an answer card the line aims at the session that wrote the card. A
+  draft you already started keeps its session.
 - **Name files:** `@` at the start of a word searches the session's directory, as in Claude Code
   and pi; `↑↓` and `Tab` or `⏎` pick. A line range (`@src/app.rs#L10-20`) can follow by hand.
 - **Attach images:** `^v` pastes the clipboard's image; dragging an image file onto the terminal
@@ -148,13 +148,13 @@ message when the turn ends.
 | `j / k` | move between the options (back: scroll) |
 | `g / G` | first / last option (back: top / bottom) |
 | `1-9` | answer with that option |
-| `⏎` | option under the cursor, else ★; on an answer card, send the follow-up, or got it when its box is empty |
+| `⏎` | option under the cursor, else ★; on an answer card, got it |
 | `space` | flip the card: context and discussion |
 | `^d / ^u` | page the back |
 | `u` | undo the last answer (5 s) |
 | `n` | note on the card, or on the last answer |
 | `last row` | something else: tell the agent in your own words |
-| `a` | ask the agent a question back; on an answer card (`✉`), reopen the follow-up box after Esc |
+| `a` | ask the agent a question back; on an answer card (`✉`), message its session, as `Tab` does |
 | `s` | skip to the end of the stack |
 | `o` | open the link (MR, PR, ticket) |
 | `r` | reload |
