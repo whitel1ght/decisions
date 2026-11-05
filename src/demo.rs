@@ -152,7 +152,7 @@ impl Demo {
             &[
                 "Send the drafted reply",
                 "Change it first (add a note with n)",
-                "I'll answer myself",
+                "You answer it yourself",
             ],
             Some(1),
             &format!(
@@ -301,7 +301,7 @@ impl Demo {
                         "",
                         now + 2 * ARRIVE_EVERY_MS,
                         "The pipeline failed on backend!871: dispatch a fix agent?",
-                        &["Dispatch it", "I'll look myself"],
+                        &["The agent dispatches a fix", "You look at it yourself"],
                         Some(1),
                         "Two unit tests fail in RetrieveV2ItemSpec.",
                     ),

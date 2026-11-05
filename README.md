@@ -16,7 +16,7 @@ pi, Cursor, …), and the queue is plain Markdown files you own.
 │ │                                                                                          │ │
 │ │ ★ 1  Send the drafted reply                                                              │ │
 │ │   2  Change it first (add a note with n)                                                 │ │
-│ │   3  I'll answer myself                                                                  │ │
+│ │   3  You answer it yourself                                                              │ │
 │ │ ✎ 4  Something else… tell the agent                                                      │ │
 │ │                                                                                          │ │
 │ │ space: context · 5 lines · discussion · 0                                                │ │
@@ -57,6 +57,11 @@ The server tells the agent to send its questions to you through `ask_user` inste
 (clients that show MCP server instructions pick this up on their own; `setup` also prints an
 optional paragraph for `AGENTS.md` / `CLAUDE.md` for those that do not). Questions from every
 session land in the same deck, and each card says who asked: `D-7 · claude-code · my-repo`.
+
+Options are written for you to read, so each one says who acts: "you" is always you and "the
+agent" is the asker ("The agent dispatches a fix", "You look at it yourself"). An option with
+I, me, my or we is refused, both from `ask_user` and from `decisions add`, because on a card
+those words could mean either side.
 
 | Harness | Waits for a tool call | Raise it with | Honours progress pings |
 |---|---|---|---|

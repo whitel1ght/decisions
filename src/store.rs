@@ -45,6 +45,48 @@ pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+const FIRST_PERSON: &[&str] = &[
+    "i",
+    "i'll",
+    "i'm",
+    "i've",
+    "i'd",
+    "me",
+    "my",
+    "mine",
+    "myself",
+    "we",
+    "we'll",
+    "we're",
+    "we've",
+    "we'd",
+    "our",
+    "ours",
+    "ourselves",
+];
+
+/// The first-person word in an option, if any. The user reads options, so "I" or "we" could
+/// mean either side; an option names who acts ("you" is the user, "the agent" the asker).
+/// "I" glued to `-` or `/` is a name, not a pronoun (I-004, I/O).
+pub fn first_person(option: &str) -> Option<String> {
+    let s = option.replace('\u{2019}', "'");
+    let is_word = |c: char| c.is_alphanumeric() || c == '\'';
+    let mut rest = s.as_str();
+    while let Some(start) = rest.find(is_word) {
+        rest = &rest[start..];
+        let end = rest.find(|c: char| !is_word(c)).unwrap_or(rest.len());
+        let word = rest[..end].trim_matches('\'').to_lowercase();
+        let next = rest[end..].chars().next();
+        if FIRST_PERSON.contains(&word.as_str())
+            && !(word == "i" && matches!(next, Some('-' | '/')))
+        {
+            return Some(rest[..end].trim_matches('\'').to_string());
+        }
+        rest = &rest[end..];
+    }
+    None
+}
+
 pub fn is_id(s: &str) -> bool {
     s.strip_prefix("D-")
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
@@ -743,6 +785,12 @@ impl Store {
         if !(2..=9).contains(&opts.len()) || opts.iter().any(String::is_empty) {
             return fail("give 2 to 9 non-empty --option values");
         }
+        if let Some((o, w)) = opts.iter().find_map(|o| first_person(o).map(|w| (o, w))) {
+            return fail(format!(
+                "option \"{o}\" says \"{w}\": the user reads the options, so name who acts: \
+                 \"you\" for the user, \"the agent\" for yourself, never I, me, my or we"
+            ));
+        }
         if let Some(r) = n.recommend
             && !(1..=opts.len()).contains(&r)
         {
@@ -1062,6 +1110,49 @@ mod tests {
             options: opts.iter().map(|o| o.to_string()).collect(),
             ..New::default()
         }
+    }
+
+    #[test]
+    fn options_name_who_acts_without_first_person() {
+        for bad in [
+            "Hold; I'll push",
+            "I will run it",
+            "Leave it, I’ll edit it myself",
+            "We revisit it Friday",
+            "Let me check first",
+            "Merge it after our release",
+        ] {
+            assert!(first_person(bad).is_some(), "{bad}");
+        }
+        for ok in [
+            "You run it yourself",
+            "The agent runs it through the admin pod",
+            "I-004 yes, others later",
+            "Check I/O first",
+            "us-east-1 only",
+            "Ship it",
+            "Wait for Ivan",
+        ] {
+            assert_eq!(first_person(ok), None, "{ok}");
+        }
+        let s = store();
+        let e = s
+            .add(new("", "Who runs it?", &["You run it", "I will run it"]))
+            .unwrap_err();
+        assert!(
+            e.0.contains("option \"I will run it\" says \"I\""),
+            "{}",
+            e.0
+        );
+        assert!(e.0.contains("\"the agent\""), "{}", e.0);
+        assert!(
+            s.add(new(
+                "",
+                "Who runs it?",
+                &["You run it", "The agent runs it"]
+            ))
+            .is_ok()
+        );
     }
 
     fn first(s: &Store) -> String {
