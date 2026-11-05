@@ -70,6 +70,10 @@ impl Runner {
                 files: d.files(&cwd),
                 cwd,
             }),
+            Command::LoadDir { cwd, dir } => self.background(move |d| Event::DirLoaded {
+                entries: d.list_dir(&cwd, &dir),
+                dir,
+            }),
             Command::SaveTarget(owner) => self.decide.save_target(&owner),
             Command::PasteImage => self.background(|d| Event::ImagePasted(d.paste_image(now_ms()))),
             Command::SendPrompt {

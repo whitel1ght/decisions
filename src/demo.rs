@@ -467,6 +467,12 @@ impl Backend for Demo {
         .to_vec()
     }
 
+    fn list_dir(&self, _cwd: &str, dir: &str) -> Vec<String> {
+        ["notes/", "report.md", "todo.md"]
+            .map(|name| format!("{dir}{name}"))
+            .to_vec()
+    }
+
     fn paste_image(&self, _stamp: i64) -> Result<crate::prompt::Image, String> {
         Err("demo: no clipboard here".into())
     }

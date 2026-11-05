@@ -113,6 +113,8 @@ pub trait Backend: Send + Sync {
     fn save_target(&self, owner: &str);
     /// The files `@` offers for a session working in `cwd`.
     fn files(&self, cwd: &str) -> Vec<String>;
+    /// What is in folder `dir` as typed after `@`; a relative one is from `cwd`.
+    fn list_dir(&self, cwd: &str, dir: &str) -> Vec<String>;
     /// Saves the clipboard's image; `stamp` makes its name unique.
     fn paste_image(&self, stamp: i64) -> Result<Image, String>;
     /// Sends the user's message to a session; returns the card it opened.

@@ -10,7 +10,7 @@ use ratatui::widgets::{
     Bar, BarChart, BarGroup, Block, BorderType, Clear, Padding, Paragraph, Sparkline, Wrap,
 };
 
-use crate::app::{FLIP_MS, InputKind, Pick, Side, State, UNDO_MS, age_label, band};
+use crate::app::{FLIP_MS, InputKind, Pick, PromptLine, Side, State, UNDO_MS, age_label, band};
 use crate::markdown;
 use crate::queue::Decision;
 use crate::stats::{self, Stats};
@@ -541,10 +541,13 @@ fn prompt_pick(f: &mut Frame, s: &State, bar: Rect, deck: Rect) {
                 .collect(),
         ),
         Pick::Files { sel, .. } => (
-            format!(
-                " files in {} ",
-                p.target_session().map_or("the session", |x| x.dir_name())
-            ),
+            match file_pick_folder(p) {
+                Some(dir) => format!(" files in {dir} "),
+                None => format!(
+                    " files in {} ",
+                    p.target_session().map_or("the session", |x| x.dir_name())
+                ),
+            },
             p.file_rows()
                 .into_iter()
                 .enumerate()
@@ -577,6 +580,14 @@ fn prompt_pick(f: &mut Frame, s: &State, bar: Rect, deck: Rect) {
         .style(Style::new().bg(theme::BG));
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+/// The folder an `@` path names, when it names one outside the session's search.
+fn file_pick_folder(p: &PromptLine) -> Option<&str> {
+    let Pick::Files { at, .. } = &p.pick else {
+        return None;
+    };
+    crate::prompt::outside_path(&p.text[at + 1..]).map(|(dir, _)| dir)
 }
 
 fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {

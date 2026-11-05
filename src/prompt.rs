@@ -16,6 +16,7 @@ const SKIPPED_DIRS: &[&str] = &[
     "__pycache__",
 ];
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+const MAX_LISTED: usize = 5_000;
 
 /// An image attached to the prompt line.
 #[derive(Debug, Clone, PartialEq)]
@@ -148,6 +149,67 @@ pub fn search(files: &[String], query: &str, limit: usize) -> Vec<String> {
         .into_iter()
         .take(limit)
         .map(|(_, f)| f.clone())
+        .collect()
+}
+
+/// What follows `@` when it names a path by where it is rather than searching the session's
+/// files: the folder as typed, and the start of a name in it. A line range takes no part.
+pub fn outside_path(query: &str) -> Option<(&str, &str)> {
+    let path = query.split('#').next().unwrap_or(query);
+    if !["/", "~/", "./", "../"].iter().any(|p| path.starts_with(p)) {
+        return None;
+    }
+    let cut = path.rfind('/')? + 1;
+    Some(path.split_at(cut))
+}
+
+/// What is in folder `dir`, written as `dir` was, so `~/` stays `~/` in the message. A folder ends
+/// in `/`. A relative `dir` is from `cwd`, the session's directory, where the session will read it.
+pub fn list_dir(cwd: &str, dir: &str) -> Vec<String> {
+    let folder = expand_home(dir.to_string());
+    let folder = if folder.is_absolute() {
+        folder
+    } else {
+        Path::new(cwd).join(folder)
+    };
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut list: Vec<String> = entries
+        .flatten()
+        .take(MAX_LISTED)
+        .map(|e| {
+            let slash = if e.path().is_dir() { "/" } else { "" };
+            format!("{dir}{}{slash}", e.file_name().to_string_lossy())
+        })
+        .collect();
+    list.sort_by_key(|p| p.to_lowercase());
+    list
+}
+
+/// The best `limit` of a folder's entries for the start of a name: names starting with it, then
+/// names containing it, each in folder order. Hidden ones only once a dot is typed.
+pub fn path_rows(entries: &[String], dir: &str, name: &str, limit: usize) -> Vec<String> {
+    let name = name.to_lowercase();
+    let mut found: Vec<(usize, &String)> = entries
+        .iter()
+        .filter_map(|e| {
+            let base = e.strip_prefix(dir)?.trim_end_matches('/').to_lowercase();
+            if base.starts_with('.') && !name.starts_with('.') {
+                return None;
+            }
+            if base.starts_with(&name) {
+                Some((0, e))
+            } else {
+                base.contains(&name).then_some((1, e))
+            }
+        })
+        .collect();
+    found.sort_by_key(|(rank, _)| *rank);
+    found
+        .into_iter()
+        .take(limit)
+        .map(|(_, e)| e.clone())
         .collect()
 }
 
@@ -341,6 +403,88 @@ mod tests {
         );
         assert_eq!(search(&files, "fil", 1), ["src/components/FilterBar.vue"]);
         assert!(search(&files, "srcfil", 9).contains(&"src/f_i_l.rs".to_string()));
+    }
+
+    #[test]
+    fn a_path_by_where_it_is_is_told_from_a_search() {
+        assert_eq!(outside_path("~/wik"), Some(("~/", "wik")));
+        assert_eq!(outside_path("~/"), Some(("~/", "")));
+        assert_eq!(outside_path("/Users/me/pro"), Some(("/Users/me/", "pro")));
+        assert_eq!(outside_path("/"), Some(("/", "")));
+        assert_eq!(outside_path("../dot"), Some(("../", "dot")));
+        assert_eq!(outside_path("../../a/b"), Some(("../../a/", "b")));
+        assert_eq!(outside_path("./sr"), Some(("./", "sr")));
+        assert_eq!(outside_path("~/a.rs#L1-2"), Some(("~/", "a.rs")));
+        for search in ["", "app", "src/app", "~", "..", ".", ".env", "~wiki"] {
+            assert_eq!(outside_path(search), None, "{search}");
+        }
+    }
+
+    fn folder(name: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("decisions-prompt-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Sub")).unwrap();
+        std::fs::create_dir_all(d.join("cwd")).unwrap();
+        std::fs::write(d.join("zeta.md"), "").unwrap();
+        std::fs::write(d.join("alpha.md"), "").unwrap();
+        std::fs::write(d.join(".hidden"), "").unwrap();
+        d
+    }
+
+    #[test]
+    fn a_folder_lists_in_the_form_it_was_typed() {
+        let d = folder("forms");
+        let abs = format!("{}/", d.display());
+        let names = |list: Vec<String>, dir: &str| -> Vec<String> {
+            list.iter()
+                .map(|e| e.strip_prefix(dir).unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(list_dir("", &abs), &abs),
+            [".hidden", "alpha.md", "cwd/", "Sub/", "zeta.md"]
+        );
+        let cwd = d.join("cwd");
+        assert_eq!(
+            names(list_dir(&cwd.to_string_lossy(), "../"), "../"),
+            [".hidden", "alpha.md", "cwd/", "Sub/", "zeta.md"]
+        );
+        assert!(list_dir(&cwd.to_string_lossy(), "./").is_empty());
+        assert!(list_dir("", "/no/such/folder/").is_empty());
+    }
+
+    #[test]
+    fn home_is_expanded_only_to_read_it() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let want = std::fs::read_dir(&home).unwrap().count();
+        let got = list_dir("/", "~/");
+        assert_eq!(got.len(), want.min(MAX_LISTED));
+        assert!(got.iter().all(|e| e.starts_with("~/")), "{got:?}");
+    }
+
+    #[test]
+    fn a_link_to_a_folder_is_a_folder() {
+        let d = folder("link");
+        std::os::unix::fs::symlink(d.join("Sub"), d.join("linked")).unwrap();
+        let dir = format!("{}/", d.display());
+        assert!(list_dir("", &dir).contains(&format!("{dir}linked/")));
+    }
+
+    #[test]
+    fn a_folders_rows_start_with_the_name_then_contain_it_and_hide_dotfiles() {
+        let list: Vec<String> = ["~/.wiki", "~/awiki.md", "~/wiki/", "~/Wikipedia", "~/zz"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            path_rows(&list, "~/", "wik", 8),
+            ["~/wiki/", "~/Wikipedia", "~/awiki.md"]
+        );
+        assert_eq!(path_rows(&list, "~/", "", 2), ["~/awiki.md", "~/wiki/"]);
+        assert_eq!(path_rows(&list, "~/", ".w", 8), ["~/.wiki"]);
+        assert_eq!(path_rows(&list, "~/", "nope", 8), Vec::<String>::new());
     }
 
     #[test]

@@ -125,6 +125,9 @@ while the deck stays open.
   draft you already started keeps its session.
 - **Name files:** `@` at the start of a word searches the session's directory, as in Claude Code
   and pi; `↑↓` and `Tab` or `⏎` pick. A line range (`@src/app.rs#L10-20`) can follow by hand.
+  `@/`, `@~/`, `@./` and `@../` reach anywhere else: they list that folder as you type, and the
+  path stays in the form you wrote it. A relative one is from the session's directory, and hidden
+  files show once you type the dot.
 - **Attach images:** `^v` pastes the clipboard's image; dragging an image file onto the terminal
   attaches it too. On Linux `^v` needs `wl-paste` or `xclip`.
 

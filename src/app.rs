@@ -57,6 +57,10 @@ pub enum Event {
         sessions: Vec<Session>,
         last: Option<String>,
     },
+    DirLoaded {
+        dir: String,
+        entries: Vec<String>,
+    },
     FilesLoaded {
         cwd: String,
         files: Vec<String>,
@@ -90,6 +94,10 @@ pub enum Command {
     },
     LoadSessions,
     LoadFiles(String),
+    LoadDir {
+        cwd: String,
+        dir: String,
+    },
     SaveTarget(String),
     PasteImage,
     SendPrompt {
@@ -197,6 +205,9 @@ pub struct PromptLine {
     pub sessions: Vec<Session>,
     pub files: Vec<String>,
     pub files_cwd: String,
+    /// The folder an `@` path is in, as typed, and what is in it.
+    pub dir: String,
+    pub dir_entries: Vec<String>,
     /// The draft of a message on its way, to put back if it fails.
     pub sending: Option<(String, Vec<Image>)>,
     /// Messages that failed as the deck closed, with why: reported on the way out.
@@ -227,7 +238,14 @@ impl PromptLine {
         let Pick::Files { at, .. } = &self.pick else {
             return Vec::new();
         };
-        prompt::search(&self.files, &self.text[at + 1..], FILE_ROWS)
+        let query = &self.text[at + 1..];
+        match prompt::outside_path(query) {
+            Some((dir, name)) if dir == self.dir => {
+                prompt::path_rows(&self.dir_entries, dir, name, FILE_ROWS)
+            }
+            Some(_) => Vec::new(),
+            None => prompt::search(&self.files, query, FILE_ROWS),
+        }
     }
 }
 
@@ -336,6 +354,11 @@ pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
         Event::Sent { id, ask, result } => sent(s, id, ask, result, &mut out),
         Event::Paste(text) => paste(s, text, &mut out),
         Event::SessionsLoaded { sessions, last } => sessions_loaded(s, sessions, last, &mut out),
+        Event::DirLoaded { dir, entries } => {
+            if s.prompt.dir == dir {
+                s.prompt.dir_entries = entries;
+            }
+        }
         Event::FilesLoaded { cwd, files } => {
             if s.prompt.files_cwd == cwd {
                 s.prompt.files = files;
@@ -808,6 +831,26 @@ fn load_files(s: &mut State, out: &mut Vec<Command>) {
     }
 }
 
+/// The folder an `@` path has reached, once each time it changes.
+fn load_dir(s: &mut State, out: &mut Vec<Command>) {
+    let Pick::Files { at, .. } = s.prompt.pick else {
+        return;
+    };
+    let Some((dir, _)) = prompt::outside_path(&s.prompt.text[at + 1..]) else {
+        return;
+    };
+    if s.prompt.dir != dir {
+        let dir = dir.to_string();
+        s.prompt.dir = dir.clone();
+        s.prompt.dir_entries.clear();
+        let cwd = s
+            .prompt
+            .target_session()
+            .map_or(String::new(), |x| x.cwd.clone());
+        out.push(Command::LoadDir { cwd, dir });
+    }
+}
+
 fn choose_session(s: &mut State, owner: String, out: &mut Vec<Command>) {
     s.prompt.pick = Pick::None;
     s.prompt.target = Some(owner.clone());
@@ -819,7 +862,10 @@ fn prompt_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
     match s.prompt.pick.clone() {
         Pick::None => prompt_text_key(s, k, out),
         Pick::Sessions { query, sel } => session_pick_key(s, k, query, sel, out),
-        Pick::Files { at, sel } => file_pick_key(s, k, at, sel),
+        Pick::Files { at, sel } => {
+            file_pick_key(s, k, at, sel);
+            load_dir(s, out);
+        }
     }
 }
 
@@ -856,6 +902,9 @@ fn prompt_text_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         Key::Char('#') if p.text.is_empty() => open_session_pick(s),
         Key::Char('@') if p.text.is_empty() || p.text.ends_with(char::is_whitespace) => {
             p.text.push('@');
+            // A new `@` reads its folder afresh.
+            p.dir.clear();
+            p.dir_entries.clear();
             p.pick = Pick::Files {
                 at: p.text.len() - 1,
                 sel: 0,
@@ -2450,6 +2499,123 @@ mod tests {
         press(&mut s, Key::Enter);
         assert_eq!(s.prompt.text, "@src/");
         assert!(matches!(s.prompt.pick, Pick::Files { .. }));
+    }
+
+    fn dir_loads(cmds: Vec<Command>) -> Vec<(String, String)> {
+        cmds.into_iter()
+            .filter_map(|c| match c {
+                Command::LoadDir { cwd, dir } => Some((cwd, dir)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn press_all(s: &mut State, text: &str) -> Vec<Command> {
+        text.chars().flat_map(|c| press(s, Key::Char(c))).collect()
+    }
+
+    fn dir_arrives(s: &mut State, dir: &str, names: &[&str]) {
+        let entries = names.iter().map(|n| format!("{dir}{n}")).collect();
+        update(
+            s,
+            Event::DirLoaded {
+                dir: dir.into(),
+                entries,
+            },
+            T0,
+        );
+    }
+
+    #[test]
+    fn an_at_path_lists_its_folder_once_and_filters_by_the_name() {
+        let mut s = prompting();
+        let loads = dir_loads(press_all(&mut s, "@~/wik"));
+        assert_eq!(
+            loads,
+            [(s.prompt.target_session().unwrap().cwd.clone(), "~/".into())]
+        );
+        assert!(s.prompt.file_rows().is_empty(), "not read yet");
+        dir_arrives(&mut s, "~/", &["bin/", "wiki/", "work.md"]);
+        assert_eq!(s.prompt.file_rows(), ["~/wiki/"]);
+    }
+
+    #[test]
+    fn every_way_to_name_a_folder_outside_is_listed() {
+        for (typed, dir) in [
+            ("@/Users/me/pro", "/Users/me/"),
+            ("@~/wik", "~/"),
+            ("@../dot", "../"),
+            ("@./sr", "./"),
+        ] {
+            let mut s = prompting();
+            let loads = dir_loads(press_all(&mut s, typed));
+            let last = loads.last().map(|(_, d)| d.as_str());
+            assert_eq!(last, Some(dir), "{typed}");
+            assert_eq!(s.prompt.dir, dir);
+        }
+    }
+
+    #[test]
+    fn picking_a_folder_goes_into_it_and_a_file_ends_the_list() {
+        let mut s = prompting();
+        press_all(&mut s, "see @~/");
+        dir_arrives(&mut s, "~/", &["notes.md", "wiki/"]);
+        assert_eq!(s.prompt.file_rows(), ["~/notes.md", "~/wiki/"]);
+        press(&mut s, Key::Down);
+        let loads = dir_loads(press(&mut s, Key::Enter));
+        assert_eq!(s.prompt.text, "see @~/wiki/");
+        assert_eq!(loads.last().unwrap().1, "~/wiki/");
+        assert!(matches!(s.prompt.pick, Pick::Files { .. }));
+        dir_arrives(&mut s, "~/wiki/", &["index.md"]);
+        press(&mut s, Key::Enter);
+        assert_eq!(s.prompt.text, "see @~/wiki/index.md ");
+        assert_eq!(s.prompt.pick, Pick::None);
+    }
+
+    #[test]
+    fn a_line_range_survives_picking_from_a_folder_outside() {
+        let mut s = prompting();
+        press_all(&mut s, "@~/ind");
+        dir_arrives(&mut s, "~/", &["index.md"]);
+        press_all(&mut s, "#L1-2");
+        assert_eq!(s.prompt.file_rows(), ["~/index.md"]);
+        press(&mut s, Key::Enter);
+        assert_eq!(s.prompt.text, "@~/index.md#L1-2 ");
+    }
+
+    #[test]
+    fn backspace_out_of_a_folder_lists_the_one_above_and_late_news_is_ignored() {
+        let mut s = prompting();
+        press_all(&mut s, "@~/a/");
+        assert_eq!(s.prompt.dir, "~/a/");
+        let loads = dir_loads(press(&mut s, Key::Backspace));
+        assert_eq!(loads.last().unwrap().1, "~/");
+        dir_arrives(&mut s, "~/a/", &["late"]);
+        assert!(
+            s.prompt.dir_entries.is_empty(),
+            "that folder is left behind"
+        );
+    }
+
+    #[test]
+    fn a_new_at_reads_the_folder_again() {
+        let mut s = prompting();
+        press_all(&mut s, "@~/");
+        dir_arrives(&mut s, "~/", &["old.md"]);
+        press(&mut s, Key::Esc);
+        press(&mut s, Key::Space);
+        let loads = dir_loads(press_all(&mut s, "@~/"));
+        assert_eq!(loads.len(), 1, "the folder may have changed");
+        assert!(s.prompt.dir_entries.is_empty());
+    }
+
+    #[test]
+    fn a_plain_search_still_searches_the_sessions_files() {
+        let mut s = prompting();
+        s.prompt.files = vec!["src/app.rs".into()];
+        let loads = dir_loads(press_all(&mut s, "@src/ap"));
+        assert!(loads.is_empty());
+        assert_eq!(s.prompt.file_rows(), ["src/app.rs"]);
     }
 
     #[test]

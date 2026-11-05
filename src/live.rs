@@ -78,6 +78,10 @@ impl Backend for Live {
         prompt::files(cwd)
     }
 
+    fn list_dir(&self, cwd: &str, dir: &str) -> Vec<String> {
+        prompt::list_dir(cwd, dir)
+    }
+
     fn paste_image(&self, stamp: i64) -> Result<Image, String> {
         prompt::paste_image(&self.dir, stamp)
     }
