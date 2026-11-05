@@ -107,6 +107,31 @@ back); a text reply to the card in Telegram; or
 with `reply` on the same card; the thread shows under the answer. Neither closes it; marking it
 seen does.
 
+## Messaging a running session
+
+`Tab` in the deck (or `decisions --prompt` to open with it) brings up a prompt line under the
+cards: pick a running session, type, `⏎`. The reply lands on a card of its own, so you never
+switch to the session or scroll through its output. `Esc` closes the line and keeps your draft
+while the deck stays open.
+
+- **Pick the session:** `#` as the first character, or `Tab` again, lists the running sessions with
+  their harness, directory and state; type to filter, `1-9` or `⏎` to pick. The last one is
+  remembered.
+- **Name files:** `@` at the start of a word searches the session's directory, as in Claude Code
+  and pi; `↑↓` and `Tab` or `⏎` pick. A line range (`@src/app.rs#L10-20`) can follow by hand.
+- **Attach images:** `^v` pastes the clipboard's image; dragging an image file onto the terminal
+  attaches it too. On Linux `^v` needs `wl-paste` or `xclip`.
+
+Each `decisions mcp` server lists its session under `DECISIONS_DIR/sessions/` while it runs, so a
+session appears once it has connected, and subagents and `claude -p` runs do not.
+
+A message reaches a session the way a follow-up does, so the session needs something that turns
+it into a prompt. There is none in this repo: the harness side lists open answer cards with
+`decisions list --json` and submits the ones whose `session` is its own. Harnesses do not expand
+`@` or images in a prompt submitted this way, so the session gets paths and reads them with its
+own file tool, which is one tool call more than a typed `@`. A session busy with a turn gets the
+message when the turn ends.
+
 ## Answering
 
 | Key | |
@@ -126,6 +151,7 @@ seen does.
 | `o` | open the link (MR, PR, ticket) |
 | `r` | reload |
 | `S` | stats screen: answered and withdrawn per day, median time to answer, summary (esc or `S` returns) |
+| `Tab` | the prompt line: message a running session (`@` file, `#` session, `^v` image) |
 | `?` | all the keys |
 | `q / esc` | send pending answers and close |
 
@@ -222,6 +248,8 @@ For scripts and agents without MCP:
 | `decisions answer ID N [NOTE]` / `tell ID TEXT` / `ask ID TEXT` | answer, answer in your own words, ask back (a follow-up on an answer card) |
 | `decisions reply ID TEXT` / `withdraw ID [REASON]` / `close ID` | the asker's side |
 | `decisions wait ID [--timeout S]` | block until something happens (exit 0 answered or seen, 3 pending, 4 withdrawn, 5 asked back) |
+| `decisions sessions [--json]` | the running sessions a message can reach |
+| `decisions prompt SESSION TEXT` | message a running session (its name, directory or id); prints the card its reply lands on |
 | `decisions setup HARNESS` | how to connect a harness |
 
 The queue is one Markdown file per decision in `DECISIONS_DIR`; closed ones move to

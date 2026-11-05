@@ -10,7 +10,7 @@ use ratatui::widgets::{
     Bar, BarChart, BarGroup, Block, BorderType, Clear, Padding, Paragraph, Sparkline, Wrap,
 };
 
-use crate::app::{FLIP_MS, InputKind, Side, State, UNDO_MS, age_label, band};
+use crate::app::{FLIP_MS, InputKind, Pick, Side, State, UNDO_MS, age_label, band};
 use crate::markdown;
 use crate::queue::Decision;
 use crate::stats::{self, Stats};
@@ -49,6 +49,10 @@ const KEYS: &[(&str, &str)] = &[
     ("last row", "something else: tell the agent in your words"),
     ("a", "ask the session back"),
     ("{answer} typing", "follow up; esc closes the box, a opens"),
+    (
+        "tab",
+        "message a running session; @ file, # session, ^v image",
+    ),
     ("s", "skip to the end of the stack"),
     ("o", "open the link (MR, PR, ticket)"),
     ("r", "reload"),
@@ -107,7 +111,7 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
         );
         rows.height -= 1;
     }
-    let deck = rows.inner(Margin::new(1, 0));
+    let (deck, bar) = split_prompt(s, rows.inner(Margin::new(1, 0)));
     if let Some(st) = &s.stats {
         stats_screen(f, s, st, deck);
     } else if !s.loaded {
@@ -130,6 +134,10 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
         drawn.areas.empty = Some(empty(f, rest));
     } else {
         deck_draw(f, s, deck, &mut drawn);
+    }
+    if s.prompt.open {
+        prompt_bar(f, s, bar);
+        prompt_pick(f, s, bar, deck);
     }
     if s.help {
         help(f, s, area);
@@ -166,13 +174,23 @@ fn header(s: &State) -> String {
 }
 
 fn footer(s: &State) -> String {
+    if s.prompt.open {
+        let keys = match s.prompt.pick {
+            Pick::None => {
+                "⏎ send · ^v paste image · @ file · # or tab session · esc close, keeps draft"
+            }
+            Pick::Sessions { .. } => "1-9 or type a name · ↑↓ pick · ⏎ use this session · esc back",
+            Pick::Files { .. } => "type to search · ↑↓ pick · ⏎ or tab use it · esc keep typing",
+        };
+        return format!(" {keys} ");
+    }
     let keys = match (&s.input, s.help, s.side, &s.pending) {
         (Some(i), ..) => match &i.kind {
             InputKind::Note => "⏎ send with note · esc no note",
             InputKind::CardNote { .. } => "⏎ attach the note (empty removes it) · esc cancel",
             InputKind::Tell { .. } => "⏎ answer in your own words · esc cancel",
             InputKind::Ask { id } if s.is_answer_card(id) => {
-                "type a follow-up · ⏎ send (empty: got it) · ↑↓ cards · esc deck keys"
+                "type a follow-up · ⏎ send (empty: got it) · ↑↓ cards · esc deck keys · tab prompt"
             }
             InputKind::Ask { .. } => "⏎ ask · esc cancel",
         },
@@ -183,10 +201,10 @@ fn footer(s: &State) -> String {
         }
         (None, false, Side::Front, Some(_)) => "u undo · n note · J/K cards · 1-9 answer · ? help",
         (None, false, Side::Front, None) if s.current().is_some_and(|d| d.is_answer()) => {
-            "J/K cards · ⏎ got it · a follow up · space full answer · ? help"
+            "J/K cards · ⏎ got it · a follow up · space full answer · ? help · tab prompt"
         }
         (None, false, Side::Front, None) => {
-            "J/K cards · j/k options · 1-9 answer · ⏎ pick · space flip · ? help"
+            "J/K cards · j/k options · 1-9 answer · ⏎ pick · space flip · ? help · tab prompt"
         }
     };
     format!(" {keys} ")
@@ -367,6 +385,194 @@ fn input_box(f: &mut Frame, s: &State, rect: Rect) {
     f.render_widget(text.scroll((top, 0)).block(block), rect);
 }
 
+/// The prompt line's content: the target session, the text, then any images.
+fn prompt_text(s: &State) -> Paragraph<'static> {
+    let p = &s.prompt;
+    let chip = match p.target_session() {
+        Some(x) => Span::styled(
+            format!(" {} ", x.label()),
+            Style::new()
+                .fg(theme::BLUE)
+                .bg(theme::SELECT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        None => Span::styled(" no session ", Style::new().fg(theme::MUTED)),
+    };
+    let typed = match &p.pick {
+        Pick::Sessions { query, .. } => {
+            Span::styled(format!("#{query}"), Style::new().fg(theme::BLUE))
+        }
+        _ => Span::styled(p.text.clone(), Style::new().fg(theme::TEXT)),
+    };
+    let mut lines = vec![Line::from(vec![
+        chip,
+        Span::raw(" "),
+        typed,
+        Span::styled("▏", Style::new().fg(theme::LAVENDER)),
+    ])];
+    if !p.images.is_empty() {
+        let chips: Vec<String> = p
+            .images
+            .iter()
+            .enumerate()
+            .map(|(i, img)| format!("image {} · {}", i + 1, size_label(img.bytes)))
+            .collect();
+        lines.push(Line::styled(
+            chips.join("   "),
+            Style::new().fg(theme::YELLOW),
+        ));
+    }
+    Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+fn size_label(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{} KB", bytes.div_ceil(1024))
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Splits `area` into the deck and, while the prompt line is open, the line's box at its bottom.
+fn split_prompt(s: &State, area: Rect) -> (Rect, Rect) {
+    if !s.prompt.open {
+        return (area, Rect { height: 0, ..area });
+    }
+    let rows = prompt_text(s).line_count(area.width.saturating_sub(4)) as u16;
+    let h = (rows + 2)
+        .clamp(3, (area.height / 2).max(3))
+        .min(area.height);
+    (
+        Rect {
+            height: area.height - h,
+            ..area
+        },
+        Rect {
+            y: area.bottom() - h,
+            height: h,
+            ..area
+        },
+    )
+}
+
+fn prompt_bar(f: &mut Frame, s: &State, rect: Rect) {
+    if rect.height == 0 {
+        return;
+    }
+    let text = prompt_text(s);
+    let rows = text.line_count(rect.width.saturating_sub(4)) as u16;
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme::LAVENDER))
+        .title(Span::styled(
+            " prompt ",
+            Style::new()
+                .fg(theme::LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .padding(Padding::horizontal(1))
+        .style(Style::new().bg(theme::BG));
+    let top = rows.saturating_sub(rect.height.saturating_sub(2));
+    f.render_widget(Clear, rect);
+    f.render_widget(text.scroll((top, 0)).block(block), rect);
+}
+
+fn pad(text: &str, width: usize) -> String {
+    let cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{cut:<width$}")
+}
+
+/// A path that fits `width`: a long one keeps its end, where the file's name is.
+fn path_tail(path: &str, width: usize) -> String {
+    let n = path.chars().count();
+    if n <= width {
+        return path.to_string();
+    }
+    let tail: String = path.chars().skip(n + 1 - width.max(1)).collect();
+    format!("…{tail}")
+}
+
+/// The list above the prompt line: the running sessions, or the session's files.
+fn prompt_pick(f: &mut Frame, s: &State, bar: Rect, deck: Rect) {
+    let p = &s.prompt;
+    let select = |i: usize, sel: usize| {
+        if i == sel {
+            Style::new().bg(theme::SELECT)
+        } else {
+            Style::new()
+        }
+    };
+    let (title, mut lines): (String, Vec<Line<'static>>) = match &p.pick {
+        Pick::None => return,
+        Pick::Sessions { sel, .. } => (
+            " send to ".into(),
+            p.session_rows()
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    let state = if x.state == "working" {
+                        theme::BLUE
+                    } else {
+                        theme::MUTED
+                    };
+                    let n = if i < 9 {
+                        (i + 1).to_string()
+                    } else {
+                        " ".into()
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{n} "), Style::new().fg(theme::YELLOW)),
+                        Span::styled(pad(x.label(), 22), Style::new().fg(theme::TEXT)),
+                        Span::styled(
+                            pad(x.client.trim_end_matches("-code"), 8),
+                            Style::new().fg(theme::CODE),
+                        ),
+                        Span::styled(pad(x.dir_name(), 20), Style::new().fg(theme::CODE)),
+                        Span::styled(x.state.clone(), Style::new().fg(state)),
+                    ])
+                    .style(select(i, *sel))
+                })
+                .collect(),
+        ),
+        Pick::Files { sel, .. } => (
+            format!(
+                " files in {} ",
+                p.target_session().map_or("the session", |x| x.dir_name())
+            ),
+            p.file_rows()
+                .into_iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    let shown = path_tail(&path, usize::from(deck.width.min(78)).saturating_sub(6));
+                    Line::styled(shown, Style::new().fg(theme::TEXT)).style(select(i, *sel))
+                })
+                .collect(),
+        ),
+    };
+    if lines.is_empty() {
+        lines.push(Line::styled("no match", Style::new().fg(theme::MUTED)));
+    }
+    let h = (lines.len() as u16 + 2).min(deck.height);
+    let w = deck.width.saturating_sub(2).min(78);
+    if h < 3 || w < 10 {
+        return;
+    }
+    let rect = Rect {
+        x: deck.x + 1,
+        y: bar.y.saturating_sub(h),
+        width: w,
+        height: h,
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme::LAVENDER))
+        .title(Span::styled(title, Style::new().fg(theme::LAVENDER)))
+        .padding(Padding::horizontal(1))
+        .style(Style::new().bg(theme::BG));
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
 fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
     let age = s.age_ms(d);
     let mut title = vec![
@@ -390,8 +596,13 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
         }
     }
     if d.is_answer() {
+        let sent = d.prompt && d.discussion.last().is_some_and(|e| e.who == "you");
         title.push(Span::styled(
-            format!(" · {} answer", s.icons.answer),
+            if sent {
+                format!(" · {} sent", s.icons.waiting)
+            } else {
+                format!(" · {} answer", s.icons.answer)
+            },
             Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
         ));
     }
@@ -485,13 +696,18 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
 
 /// The front of an answer card: the user's question, the session's answer, and ⏎.
 fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block<'static>) {
-    let mut lines = vec![
-        Line::styled(
-            format!("you asked: {}", d.question),
-            Style::new().fg(theme::MUTED).add_modifier(Modifier::BOLD),
-        ),
-        Line::default(),
-    ];
+    // A message of the user's own has no question above it: the thread starts with the message.
+    let mut lines = if d.prompt {
+        Vec::new()
+    } else {
+        vec![
+            Line::styled(
+                format!("you asked: {}", d.question),
+                Style::new().fg(theme::MUTED).add_modifier(Modifier::BOLD),
+            ),
+            Line::default(),
+        ]
+    };
     if let Some(fl) = s.failed.get(&d.id) {
         lines.push(Line::styled(
             format!("send failed: {} · ⏎ retries", fl.error),
@@ -1561,5 +1777,137 @@ mod tests {
         for text in ['★', '✉', '↩', '⏱', '✎', '⧗'] {
             assert!(!all.contains(text), "{text} left:\n{all}");
         }
+    }
+
+    fn sessions() -> Vec<crate::sessions::Session> {
+        vec![
+            crate::sessions::Session {
+                owner: "o1".into(),
+                name: "the system".into(),
+                client: "claude-code".into(),
+                cwd: "/x/dotfiles".into(),
+                state: "working".into(),
+                ..Default::default()
+            },
+            crate::sessions::Session {
+                owner: "o2".into(),
+                client: "pi".into(),
+                cwd: "/x/backend".into(),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn prompting() -> State {
+        let mut s = state(fixture(), T0);
+        s.prompt.open = true;
+        s.prompt.sessions = sessions();
+        s.prompt.target = Some("o1".into());
+        s
+    }
+
+    #[test]
+    fn a_closed_prompt_line_takes_no_room_and_the_footer_names_its_key() {
+        let s = state(fixture(), T0);
+        let (buf, _) = render(&s, 110, 24);
+        let all = screen(&buf);
+        assert!(all.contains("tab prompt"), "{all}");
+        assert!(!all.contains("╭ prompt"), "{all}");
+    }
+
+    #[test]
+    fn the_open_line_shows_the_target_the_text_and_the_images() {
+        let mut s = prompting();
+        s.prompt.text = "how far along?".into();
+        s.prompt.images.push(crate::prompt::Image {
+            path: "/a.png".into(),
+            bytes: 2048,
+        });
+        let (buf, _) = render(&s, 110, 24);
+        let all = screen(&buf);
+        for want in [
+            " prompt ",
+            " the system ",
+            "how far along?",
+            "image 1 · 2 KB",
+            "⏎ send",
+            "^v paste image",
+            "@ file",
+            "# or tab session",
+        ] {
+            assert!(all.contains(want), "{want:?} missing:\n{all}");
+        }
+    }
+
+    #[test]
+    fn the_session_list_shows_each_sessions_name_harness_directory_and_state() {
+        let mut s = prompting();
+        s.prompt.pick = Pick::Sessions {
+            query: String::new(),
+            sel: 0,
+        };
+        let (buf, _) = render(&s, 110, 24);
+        let all = screen(&buf);
+        for want in [
+            "send to",
+            "1 the system",
+            "claude",
+            "dotfiles",
+            "working",
+            "2 backend",
+            "#",
+        ] {
+            assert!(all.contains(want), "{want:?} missing:\n{all}");
+        }
+    }
+
+    #[test]
+    fn the_file_list_names_the_sessions_directory_and_its_matches() {
+        let mut s = prompting();
+        s.prompt.files = vec!["src/app.rs".into(), "README.md".into()];
+        s.prompt.text = "@app".into();
+        s.prompt.pick = Pick::Files { at: 0, sel: 0 };
+        let (buf, _) = render(&s, 110, 24);
+        let all = screen(&buf);
+        assert!(all.contains("files in dotfiles"), "{all}");
+        assert!(all.contains("src/app.rs"), "{all}");
+        assert!(!all.contains("README.md"), "{all}");
+    }
+
+    #[test]
+    fn a_long_path_in_the_list_keeps_its_end() {
+        assert_eq!(path_tail("src/app.rs", 20), "src/app.rs");
+        assert_eq!(path_tail("very/long/path/app.rs", 10), "…th/app.rs");
+    }
+
+    #[test]
+    fn an_open_line_fits_the_smallest_window() {
+        let mut s = prompting();
+        s.prompt.text = "word ".repeat(200);
+        s.prompt.pick = Pick::Sessions {
+            query: String::new(),
+            sel: 0,
+        };
+        render(&s, MIN_W, MIN_H);
+    }
+
+    #[test]
+    fn a_prompt_card_shows_the_message_and_waits_for_the_reply() {
+        let mut d = answer_card();
+        d.prompt = true;
+        d.context.clear();
+        d.question = "how far along?".into();
+        d.discussion = vec![crate::queue::Entry {
+            at: "10:00".into(),
+            who: "you".into(),
+            text: "how far along?".into(),
+        }];
+        let s = state(vec![d], T0);
+        let (buf, _) = render(&s, 110, 24);
+        let all = screen(&buf);
+        assert!(all.contains("you: how far along?"), "{all}");
+        assert!(all.contains("waiting for the session's reply"), "{all}");
+        assert!(all.contains("⧗ sent"), "{all}");
+        assert!(!all.contains("you asked:"), "{all}");
     }
 }

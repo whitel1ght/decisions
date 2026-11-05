@@ -13,9 +13,11 @@ pub fn map(ev: KeyEvent) -> Option<Key> {
         KeyCode::Char('d') if ctrl => Key::CtrlD,
         KeyCode::Char('u') if ctrl => Key::CtrlU,
         KeyCode::Char('c') if ctrl => Key::Interrupt,
+        KeyCode::Char('v') if ctrl => Key::CtrlV,
         KeyCode::Char(_) if ctrl => return None,
         KeyCode::Char(' ') => Key::Space,
         KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Tab => Key::Tab,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
         KeyCode::Up => Key::Up,
@@ -51,6 +53,8 @@ mod tests {
         assert_eq!(press(KeyCode::Char('d'), M::CONTROL), Some(Key::CtrlD));
         assert_eq!(press(KeyCode::Char('u'), M::CONTROL), Some(Key::CtrlU));
         assert_eq!(press(KeyCode::Char('c'), M::CONTROL), Some(Key::Interrupt));
+        assert_eq!(press(KeyCode::Char('v'), M::CONTROL), Some(Key::CtrlV));
+        assert_eq!(press(KeyCode::Tab, M::NONE), Some(Key::Tab));
         assert_eq!(press(KeyCode::Enter, M::NONE), Some(Key::Enter));
         assert_eq!(press(KeyCode::Esc, M::NONE), Some(Key::Esc));
         assert_eq!(press(KeyCode::Up, M::NONE), Some(Key::Up));

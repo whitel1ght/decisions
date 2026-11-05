@@ -2,12 +2,15 @@
 
 use crate::config::Config;
 use crate::hook;
+use crate::prompt::{self, Image};
 use crate::queue::{Backend, Decision};
+use crate::sessions::{self, Session};
 use crate::stats::{self, Stats};
-use crate::store::{Event, Store};
+use crate::store::{Event, NewPrompt, Store};
 
 pub struct Live {
     store: Store,
+    dir: std::path::PathBuf,
     on_answer: Option<String>,
 }
 
@@ -15,6 +18,7 @@ impl Live {
     pub fn new(cfg: &Config) -> Self {
         Self {
             store: cfg.store(),
+            dir: cfg.dir.clone(),
             on_answer: cfg.on_answer.clone(),
         }
     }
@@ -53,6 +57,36 @@ impl Backend for Live {
             chrono::Local::now().fixed_offset(),
             days,
         ))
+    }
+
+    fn sessions(&self) -> Vec<Session> {
+        sessions::running(&self.dir)
+    }
+
+    fn last_target(&self) -> Option<String> {
+        sessions::last_target(&self.dir)
+    }
+
+    fn save_target(&self, owner: &str) {
+        sessions::save_target(&self.dir, owner);
+    }
+
+    fn files(&self, cwd: &str) -> Vec<String> {
+        prompt::files(cwd)
+    }
+
+    fn paste_image(&self, stamp: i64) -> Result<Image, String> {
+        prompt::paste_image(&self.dir, stamp)
+    }
+
+    fn prompt(&self, session: &str, source: &str, text: &str) -> Result<String, String> {
+        self.store
+            .add_prompt(NewPrompt {
+                session: session.into(),
+                source: source.into(),
+                text: text.into(),
+            })
+            .map_err(|e| e.0)
     }
 }
 

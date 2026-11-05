@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::prompt::Image;
+use crate::sessions::Session;
 use crate::stats::{self, Stats};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -37,6 +39,9 @@ pub struct Decision {
     /// `answer` for a card reporting an answer to the user's question; empty for a question.
     #[serde(default)]
     pub kind: String,
+    /// An answer card opened by the user's own message to a session, from the prompt line.
+    #[serde(default)]
+    pub prompt: bool,
     pub question: String,
     pub asked: String,
     #[serde(default)]
@@ -87,6 +92,17 @@ pub trait Backend: Send + Sync {
             days,
         ))
     }
+    /// The running sessions a prompt can reach.
+    fn sessions(&self) -> Vec<Session>;
+    /// The session the last prompt went to.
+    fn last_target(&self) -> Option<String>;
+    fn save_target(&self, owner: &str);
+    /// The files `@` offers for a session working in `cwd`.
+    fn files(&self, cwd: &str) -> Vec<String>;
+    /// Saves the clipboard's image; `stamp` makes its name unique.
+    fn paste_image(&self, stamp: i64) -> Result<Image, String>;
+    /// Sends the user's message to a session; returns the card it opened.
+    fn prompt(&self, session: &str, source: &str, text: &str) -> Result<String, String>;
 }
 
 #[cfg(test)]

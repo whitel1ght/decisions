@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
+use crate::prompt::{self, Image};
 use crate::queue::Decision;
+use crate::sessions::{self, Session};
 use crate::stats::Stats;
 use crate::theme::Icons;
 
@@ -13,6 +15,10 @@ pub const GHOST_MS: i64 = 200;
 pub const FLIP_MS: i64 = 300;
 pub const TOAST_MS: i64 = 3_000;
 const HALF_PAGE: u16 = 10;
+/// How many files the `@` list shows.
+const FILE_ROWS: usize = 8;
+/// How often the open prompt line re-reads the running sessions.
+const SESSIONS_EVERY_MS: i64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -23,8 +29,10 @@ pub enum Key {
     Down,
     Space,
     Backspace,
+    Tab,
     CtrlD,
     CtrlU,
+    CtrlV,
     Interrupt,
 }
 
@@ -43,6 +51,19 @@ pub enum Event {
     Signal,
     /// The statistics asked for with `S` are ready.
     StatsLoaded(Result<Box<Stats>, String>),
+    /// Text pasted into the terminal, in one piece.
+    Paste(String),
+    SessionsLoaded {
+        sessions: Vec<Session>,
+        last: Option<String>,
+    },
+    FilesLoaded {
+        cwd: String,
+        files: Vec<String>,
+    },
+    ImagePasted(Result<Image, String>),
+    /// A message from the prompt line went out; the card it opened, or why it did not.
+    PromptSent(Result<String, String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +87,15 @@ pub enum Command {
     /// The user has read an answer card.
     Seen {
         id: String,
+    },
+    LoadSessions,
+    LoadFiles(String),
+    SaveTarget(String),
+    PasteImage,
+    SendPrompt {
+        session: String,
+        source: String,
+        text: String,
     },
     OpenUrl(String),
     Quit,
@@ -144,8 +174,64 @@ pub struct AskFailed {
     pub error: String,
 }
 
+/// The list open above the prompt line.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Pick {
+    #[default]
+    None,
+    /// Running sessions, filtered by what follows the `#`.
+    Sessions { query: String, sel: usize },
+    /// The session's files for the `@` at byte `at` of the text.
+    Files { at: usize, sel: usize },
+}
+
+/// The line for messages to running sessions. Closing it keeps the draft.
+#[derive(Debug, Default)]
+pub struct PromptLine {
+    pub open: bool,
+    pub text: String,
+    pub images: Vec<Image>,
+    /// The chosen session's owner id.
+    pub target: Option<String>,
+    pub pick: Pick,
+    pub sessions: Vec<Session>,
+    pub files: Vec<String>,
+    pub files_cwd: String,
+    /// The draft of a message on its way, to put back if it fails.
+    pub sending: Option<(String, Vec<Image>)>,
+    pub loaded_at: i64,
+}
+
+impl PromptLine {
+    pub fn target_session(&self) -> Option<&Session> {
+        let target = self.target.as_ref()?;
+        self.sessions.iter().find(|s| &s.owner == target)
+    }
+
+    /// The sessions the open list shows.
+    pub fn session_rows(&self) -> Vec<&Session> {
+        let Pick::Sessions { query, .. } = &self.pick else {
+            return Vec::new();
+        };
+        let q = query.to_lowercase();
+        self.sessions
+            .iter()
+            .filter(|s| sessions::matches(s, &q))
+            .collect()
+    }
+
+    /// The files the open list shows.
+    pub fn file_rows(&self) -> Vec<String> {
+        let Pick::Files { at, .. } = &self.pick else {
+            return Vec::new();
+        };
+        prompt::search(&self.files, &self.text[at + 1..], FILE_ROWS)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct State {
+    pub prompt: PromptLine,
     pub queue: Vec<Decision>,
     pub cur: usize,
     pub side: Side,
@@ -251,6 +337,16 @@ pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
         Event::StatsLoaded(Ok(st)) => s.stats = Some(*st),
         Event::StatsLoaded(Err(e)) => s.toast(format!("stats failed: {e}")),
         Event::Sent { id, ask, result } => sent(s, id, ask, result, &mut out),
+        Event::Paste(text) => paste(s, text, &mut out),
+        Event::SessionsLoaded { sessions, last } => sessions_loaded(s, sessions, last, &mut out),
+        Event::FilesLoaded { cwd, files } => {
+            if s.prompt.files_cwd == cwd {
+                s.prompt.files = files;
+            }
+        }
+        Event::ImagePasted(Ok(image)) => s.prompt.images.push(image),
+        Event::ImagePasted(Err(e)) => s.toast(e),
+        Event::PromptSent(result) => prompt_sent(s, result),
         Event::Signal => {
             send_pending(s, &mut out);
             s.quitting = true;
@@ -284,6 +380,7 @@ fn answer_box(s: &mut State) {
         s.box_closed = None;
     }
     let busy = s.input.is_some()
+        || s.prompt.open
         || s.pending.is_some()
         || s.help
         || s.stats.is_some()
@@ -295,6 +392,10 @@ fn answer_box(s: &mut State) {
 }
 
 fn tick(s: &mut State, out: &mut Vec<Command>) {
+    if s.prompt.open && s.now - s.prompt.loaded_at >= SESSIONS_EVERY_MS {
+        s.prompt.loaded_at = s.now;
+        out.push(Command::LoadSessions);
+    }
     if s.pending
         .as_ref()
         .is_some_and(|p| !p.paused && s.now >= p.due)
@@ -377,6 +478,12 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
     s.flip = None;
     if k == Key::Interrupt {
         return quit(s, out);
+    }
+    if s.prompt.open {
+        return prompt_key(s, k, out);
+    }
+    if k == Key::Tab && !s.help && s.stats.is_none() {
+        return open_prompt(s, out);
     }
     if s.input.is_some() {
         return input_key(s, k, out);
@@ -668,6 +775,266 @@ fn ask(s: &mut State) {
             kind: InputKind::Ask { id },
             text,
         });
+    }
+}
+
+/// Tab, or `decisions --prompt`: the prompt line opens with its draft and its last session.
+pub fn open_prompt(s: &mut State, out: &mut Vec<Command>) {
+    s.prompt.open = true;
+    s.prompt.pick = Pick::None;
+    s.prompt.loaded_at = s.now;
+    out.push(Command::LoadSessions);
+}
+
+fn sessions_loaded(
+    s: &mut State,
+    list: Vec<Session>,
+    last: Option<String>,
+    out: &mut Vec<Command>,
+) {
+    let p = &mut s.prompt;
+    p.sessions = list;
+    let has = |id: &String| p.sessions.iter().any(|x| &x.owner == id);
+    if !p.target.as_ref().is_some_and(has) {
+        p.target = last
+            .filter(has)
+            .or_else(|| p.sessions.first().map(|x| x.owner.clone()));
+    }
+    load_files(s, out);
+}
+
+/// The target session's files, once per session; `@` searches them.
+fn load_files(s: &mut State, out: &mut Vec<Command>) {
+    let Some(cwd) = s.prompt.target_session().map(|x| x.cwd.clone()) else {
+        return;
+    };
+    if s.prompt.files_cwd != cwd {
+        s.prompt.files.clear();
+        s.prompt.files_cwd = cwd.clone();
+        out.push(Command::LoadFiles(cwd));
+    }
+}
+
+fn choose_session(s: &mut State, owner: String, out: &mut Vec<Command>) {
+    s.prompt.pick = Pick::None;
+    s.prompt.target = Some(owner.clone());
+    out.push(Command::SaveTarget(owner));
+    load_files(s, out);
+}
+
+fn prompt_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
+    match s.prompt.pick.clone() {
+        Pick::None => prompt_text_key(s, k, out),
+        Pick::Sessions { query, sel } => session_pick_key(s, k, query, sel, out),
+        Pick::Files { at, sel } => file_pick_key(s, k, at, sel),
+    }
+}
+
+fn open_session_pick(s: &mut State) {
+    let sel = s
+        .prompt
+        .sessions
+        .iter()
+        .position(|x| Some(&x.owner) == s.prompt.target.as_ref())
+        .unwrap_or(0);
+    s.prompt.pick = Pick::Sessions {
+        query: String::new(),
+        sel,
+    };
+    if s.prompt.sessions.is_empty() {
+        s.toast("no running sessions".into());
+    }
+}
+
+fn prompt_text_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
+    let p = &mut s.prompt;
+    match k {
+        Key::Esc => p.open = false,
+        Key::Tab => open_session_pick(s),
+        Key::CtrlV => out.push(Command::PasteImage),
+        Key::Enter => send_prompt(s, out),
+        Key::Backspace => {
+            if p.text.pop().is_none() {
+                p.images.pop();
+            }
+        }
+        Key::Space => p.text.push(' '),
+        // `#` picks the session only as the line's first character; later it is plain text.
+        Key::Char('#') if p.text.is_empty() => open_session_pick(s),
+        Key::Char('@') if p.text.is_empty() || p.text.ends_with(char::is_whitespace) => {
+            p.text.push('@');
+            p.pick = Pick::Files {
+                at: p.text.len() - 1,
+                sel: 0,
+            };
+        }
+        Key::Char(c) => p.text.push(c),
+        _ => {}
+    }
+}
+
+fn session_pick_key(
+    s: &mut State,
+    k: Key,
+    mut query: String,
+    mut sel: usize,
+    out: &mut Vec<Command>,
+) {
+    let rows: Vec<String> = s
+        .prompt
+        .session_rows()
+        .iter()
+        .map(|x| x.owner.clone())
+        .collect();
+    match k {
+        Key::Esc => s.prompt.pick = Pick::None,
+        Key::Enter | Key::Tab => match rows.get(sel) {
+            Some(owner) => choose_session(s, owner.clone(), out),
+            None => s.prompt.pick = Pick::None,
+        },
+        Key::Down => sel = (sel + 1).min(rows.len().saturating_sub(1)),
+        Key::Up => sel = sel.saturating_sub(1),
+        // A number picks a row until a filter is typed; a session may have digits in its name.
+        Key::Char(c @ '1'..='9') if query.is_empty() => {
+            if let Some(owner) = rows.get(c as usize - '1' as usize) {
+                choose_session(s, owner.clone(), out);
+            }
+        }
+        Key::Backspace if query.is_empty() => s.prompt.pick = Pick::None,
+        Key::Backspace => {
+            query.pop();
+            sel = 0;
+        }
+        Key::Space => {
+            query.push(' ');
+            sel = 0;
+        }
+        Key::Char(c) => {
+            query.push(c);
+            sel = 0;
+        }
+        _ => {}
+    }
+    if matches!(s.prompt.pick, Pick::Sessions { .. }) {
+        s.prompt.pick = Pick::Sessions { query, sel };
+    }
+}
+
+fn file_pick_key(s: &mut State, k: Key, at: usize, mut sel: usize) {
+    let rows = s.prompt.file_rows();
+    let p = &mut s.prompt;
+    match k {
+        Key::Esc => {
+            p.pick = Pick::None;
+            return;
+        }
+        Key::Enter | Key::Tab => {
+            let Some(path) = rows.get(sel) else {
+                p.pick = Pick::None;
+                return;
+            };
+            p.text.truncate(at + 1);
+            p.text.push_str(path);
+            // A directory stays open for the next part of its path.
+            if !path.ends_with('/') {
+                p.text.push(' ');
+                p.pick = Pick::None;
+            } else {
+                p.pick = Pick::Files { at, sel: 0 };
+            }
+            return;
+        }
+        Key::Down => sel = (sel + 1).min(rows.len().saturating_sub(1)),
+        Key::Up => sel = sel.saturating_sub(1),
+        Key::Backspace => {
+            p.text.pop();
+            sel = 0;
+            if p.text.len() <= at {
+                p.pick = Pick::None;
+                return;
+            }
+        }
+        Key::Space => {
+            p.text.push(' ');
+            p.pick = Pick::None;
+            return;
+        }
+        Key::Char(c) => {
+            p.text.push(c);
+            sel = 0;
+        }
+        _ => {}
+    }
+    p.pick = Pick::Files { at, sel };
+}
+
+fn send_prompt(s: &mut State, out: &mut Vec<Command>) {
+    let text = s.prompt.text.trim().to_string();
+    if text.is_empty() && s.prompt.images.is_empty() {
+        return;
+    }
+    let Some((owner, label)) = s
+        .prompt
+        .target_session()
+        .map(|x| (x.owner.clone(), x.label().to_string()))
+    else {
+        s.toast("pick a running session first".into());
+        return open_session_pick(s);
+    };
+    let images = std::mem::take(&mut s.prompt.images);
+    out.push(Command::SendPrompt {
+        session: owner,
+        source: format!("prompt · {label}"),
+        text: prompt::compose(&text, &images),
+    });
+    s.prompt.sending = Some((std::mem::take(&mut s.prompt.text), images));
+    s.prompt.open = false;
+    s.toast(format!("sending to {label}…"));
+}
+
+fn prompt_sent(s: &mut State, result: Result<String, String>) {
+    let draft = s.prompt.sending.take();
+    match result {
+        Ok(id) => {
+            let label = s
+                .prompt
+                .target_session()
+                .map_or("the session", |x| x.label())
+                .to_string();
+            s.toast(format!("✓ sent to {label} · reply on {id}"));
+        }
+        Err(e) => {
+            if let Some((text, images)) = draft {
+                s.prompt.text = text;
+                s.prompt.images = images;
+            }
+            s.prompt.open = true;
+            s.toast(format!("not sent: {e}"));
+        }
+    }
+}
+
+/// A paste on the prompt line attaches images or inserts text in one line. Anywhere else it
+/// types itself, a newline being Enter, as a terminal paste did before pastes came in one piece.
+fn paste(s: &mut State, text: String, out: &mut Vec<Command>) {
+    if s.prompt.open {
+        if let Some(mut images) = prompt::pasted_images(&text) {
+            s.prompt.images.append(&mut images);
+            return;
+        }
+        if s.prompt.pick == Pick::None {
+            s.prompt.text.push_str(&crate::store::one_line(&text));
+            return;
+        }
+    }
+    for c in text.chars() {
+        let k = match c {
+            '\n' | '\r' => Key::Enter,
+            ' ' => Key::Space,
+            '\t' => continue,
+            c => Key::Char(c),
+        };
+        key(s, k, out);
     }
 }
 
@@ -1860,5 +2227,262 @@ mod tests {
             "on_answer failed (exit 9): broken"
         );
         assert!(s.failed.is_empty(), "the answer stands");
+    }
+
+    fn session(owner: &str, name: &str) -> Session {
+        Session {
+            owner: owner.into(),
+            name: name.into(),
+            client: "claude-code".into(),
+            cwd: format!("/x/{owner}"),
+            ..Session::default()
+        }
+    }
+
+    /// A deck with the prompt line open on two running sessions, the first the target.
+    fn prompting() -> State {
+        let mut s = loaded(fixture());
+        press(&mut s, Key::Tab);
+        update(
+            &mut s,
+            Event::SessionsLoaded {
+                sessions: vec![session("o1", "the system"), session("o2", "ACME-1")],
+                last: None,
+            },
+            T0,
+        );
+        s
+    }
+
+    fn type_in(s: &mut State, text: &str) {
+        for c in text.chars() {
+            press(s, if c == ' ' { Key::Space } else { Key::Char(c) });
+        }
+    }
+
+    #[test]
+    fn tab_opens_the_prompt_line_and_asks_for_the_sessions() {
+        let mut s = loaded(fixture());
+        assert_eq!(press(&mut s, Key::Tab), [Command::LoadSessions]);
+        assert!(s.prompt.open);
+    }
+
+    #[test]
+    fn the_prompt_line_takes_the_deck_keys_as_text() {
+        let mut s = prompting();
+        assert!(press(&mut s, Key::Char('1')).is_empty());
+        assert!(press(&mut s, Key::Char('q')).is_empty());
+        assert_eq!(s.prompt.text, "1q");
+        assert!(s.pending.is_none() && !s.quitting);
+    }
+
+    #[test]
+    fn esc_closes_the_line_and_keeps_the_draft_and_its_images() {
+        let mut s = prompting();
+        type_in(&mut s, "half a thought");
+        let image = Image {
+            path: "/a.png".into(),
+            bytes: 1,
+        };
+        update(&mut s, Event::ImagePasted(Ok(image)), T0);
+        press(&mut s, Key::Esc);
+        assert!(!s.prompt.open);
+        press(&mut s, Key::Tab);
+        assert_eq!(s.prompt.text, "half a thought");
+        assert_eq!(s.prompt.images.len(), 1);
+    }
+
+    #[test]
+    fn tab_opens_the_line_over_an_answer_cards_follow_up_box() {
+        let mut s = loaded(vec![answer_card("D-5")]);
+        press(&mut s, Key::Char('x'));
+        assert_eq!(s.input.as_ref().unwrap().text, "x");
+        press(&mut s, Key::Tab);
+        type_in(&mut s, "yz");
+        assert_eq!(s.prompt.text, "yz");
+        assert_eq!(s.input.as_ref().unwrap().text, "x");
+        press(&mut s, Key::Esc);
+        press(&mut s, Key::Char('w'));
+        assert_eq!(s.input.as_ref().unwrap().text, "xw");
+    }
+
+    #[test]
+    fn the_last_session_is_the_target_while_it_runs_else_the_first() {
+        let mut s = loaded(fixture());
+        press(&mut s, Key::Tab);
+        let list = vec![session("o1", "a"), session("o2", "b")];
+        let load = |s: &mut State, last: &str| {
+            s.prompt.target = None;
+            update(
+                s,
+                Event::SessionsLoaded {
+                    sessions: list.clone(),
+                    last: Some(last.into()),
+                },
+                T0,
+            );
+        };
+        load(&mut s, "o2");
+        assert_eq!(s.prompt.target.as_deref(), Some("o2"));
+        load(&mut s, "gone");
+        assert_eq!(s.prompt.target.as_deref(), Some("o1"));
+    }
+
+    #[test]
+    fn hash_as_the_first_character_picks_the_session() {
+        let mut s = prompting();
+        press(&mut s, Key::Char('#'));
+        assert!(matches!(s.prompt.pick, Pick::Sessions { .. }));
+        type_in(&mut s, "acme");
+        assert_eq!(s.prompt.session_rows().len(), 1);
+        assert_eq!(
+            press(&mut s, Key::Enter)[0],
+            Command::SaveTarget("o2".into())
+        );
+        assert_eq!(s.prompt.pick, Pick::None);
+        assert_eq!(s.prompt.text, "", "the filter does not go in the message");
+    }
+
+    #[test]
+    fn a_number_picks_a_session_until_a_filter_is_typed() {
+        let mut s = prompting();
+        press(&mut s, Key::Tab);
+        press(&mut s, Key::Char('2'));
+        assert_eq!(s.prompt.target.as_deref(), Some("o2"));
+    }
+
+    #[test]
+    fn hash_later_in_the_line_is_text() {
+        let mut s = prompting();
+        type_in(&mut s, "see #123");
+        assert_eq!(s.prompt.text, "see #123");
+        assert_eq!(s.prompt.pick, Pick::None);
+    }
+
+    #[test]
+    fn at_starts_a_file_search_at_the_start_of_a_word_only() {
+        let mut s = prompting();
+        type_in(&mut s, "me@work ");
+        assert_eq!(s.prompt.pick, Pick::None);
+        press(&mut s, Key::Char('@'));
+        assert!(matches!(s.prompt.pick, Pick::Files { .. }));
+    }
+
+    #[test]
+    fn picking_a_file_puts_its_path_in_the_text() {
+        let mut s = prompting();
+        s.prompt.files = vec!["src/app.rs".into(), "src/".into(), "README.md".into()];
+        type_in(&mut s, "look at @app");
+        assert_eq!(s.prompt.file_rows(), ["src/app.rs"]);
+        press(&mut s, Key::Tab);
+        assert_eq!(s.prompt.text, "look at @src/app.rs ");
+        assert_eq!(s.prompt.pick, Pick::None);
+    }
+
+    #[test]
+    fn picking_a_directory_keeps_the_search_open_inside_it() {
+        let mut s = prompting();
+        s.prompt.files = vec!["src/".into()];
+        type_in(&mut s, "@sr");
+        press(&mut s, Key::Enter);
+        assert_eq!(s.prompt.text, "@src/");
+        assert!(matches!(s.prompt.pick, Pick::Files { .. }));
+    }
+
+    #[test]
+    fn backspace_over_the_at_ends_the_search_and_esc_keeps_the_text() {
+        let mut s = prompting();
+        type_in(&mut s, "@a");
+        press(&mut s, Key::Backspace);
+        press(&mut s, Key::Backspace);
+        assert_eq!((s.prompt.text.as_str(), &s.prompt.pick), ("", &Pick::None));
+        type_in(&mut s, "@b");
+        press(&mut s, Key::Esc);
+        assert_eq!(
+            (s.prompt.text.as_str(), &s.prompt.pick),
+            ("@b", &Pick::None)
+        );
+        assert!(s.prompt.open);
+    }
+
+    #[test]
+    fn enter_sends_the_text_and_images_to_the_target_and_closes_the_line() {
+        let mut s = prompting();
+        type_in(&mut s, "look");
+        let image = Image {
+            path: "/a.png".into(),
+            bytes: 1,
+        };
+        update(&mut s, Event::ImagePasted(Ok(image)), T0);
+        assert_eq!(
+            press(&mut s, Key::Enter),
+            [Command::SendPrompt {
+                session: "o1".into(),
+                source: "prompt · the system".into(),
+                text: "look [image: /a.png]".into(),
+            }]
+        );
+        assert!(!s.prompt.open && s.prompt.text.is_empty() && s.prompt.images.is_empty());
+    }
+
+    #[test]
+    fn a_failed_send_puts_the_draft_back() {
+        let mut s = prompting();
+        type_in(&mut s, "look");
+        press(&mut s, Key::Enter);
+        update(&mut s, Event::PromptSent(Err("disk full".into())), T0);
+        assert!(s.prompt.open);
+        assert_eq!(s.prompt.text, "look");
+        assert_eq!(s.toast.as_ref().unwrap().0, "not sent: disk full");
+    }
+
+    #[test]
+    fn enter_with_nothing_typed_sends_nothing() {
+        let mut s = prompting();
+        assert!(press(&mut s, Key::Enter).is_empty());
+        assert!(s.prompt.open);
+    }
+
+    #[test]
+    fn enter_with_no_session_asks_for_one() {
+        let mut s = loaded(fixture());
+        press(&mut s, Key::Tab);
+        type_in(&mut s, "hello");
+        assert!(press(&mut s, Key::Enter).is_empty());
+        assert_eq!(s.prompt.text, "hello");
+        assert!(matches!(s.prompt.pick, Pick::Sessions { .. }));
+    }
+
+    #[test]
+    fn a_pasted_path_to_an_image_attaches_it_and_other_text_goes_in_one_line() {
+        let d = std::env::temp_dir().join(format!("decisions-app-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let png = d.join("a.png");
+        std::fs::write(&png, "x").unwrap();
+        let mut s = prompting();
+        update(&mut s, Event::Paste(png.display().to_string()), T0);
+        assert_eq!(s.prompt.images[0].path, png);
+        assert_eq!(s.prompt.text, "");
+        update(&mut s, Event::Paste("two\nlines".into()), T0);
+        assert_eq!(s.prompt.text, "two lines");
+    }
+
+    #[test]
+    fn a_paste_with_the_line_closed_types_itself_with_newline_as_enter() {
+        let mut s = loaded(fixture());
+        press(&mut s, Key::Char('n'));
+        update(&mut s, Event::Paste("a b\n".into()), T0);
+        assert!(s.input.is_none(), "the newline sent it");
+        assert_eq!(s.notes.get("D-1").map(String::as_str), Some("a b"));
+    }
+
+    #[test]
+    fn the_open_line_reloads_the_sessions_now_and_then() {
+        let mut s = prompting();
+        assert!(update(&mut s, Event::Tick, T0 + SESSIONS_EVERY_MS - 1).is_empty());
+        assert_eq!(
+            update(&mut s, Event::Tick, T0 + SESSIONS_EVERY_MS),
+            [Command::LoadSessions]
+        );
     }
 }

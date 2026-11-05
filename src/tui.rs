@@ -13,7 +13,8 @@ use crate::fx::Fx;
 use crate::keys;
 use crate::queue::Backend;
 use crate::ui::{self, Areas};
-use crossterm::event::{self, Event as TermEvent};
+use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent};
+use crossterm::execute;
 use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
@@ -61,6 +62,24 @@ impl Runner {
             Command::Ask { id, text } => self.send(id, true, move |d, id| d.ask(id, &text)),
             Command::Tell { id, text } => self.send(id, false, move |d, id| d.tell(id, &text)),
             Command::Seen { id } => self.send(id, false, |d, id| d.seen(id)),
+            Command::LoadSessions => self.background(|d| Event::SessionsLoaded {
+                sessions: d.sessions(),
+                last: d.last_target(),
+            }),
+            Command::LoadFiles(cwd) => self.background(move |d| Event::FilesLoaded {
+                files: d.files(&cwd),
+                cwd,
+            }),
+            Command::SaveTarget(owner) => self.decide.save_target(&owner),
+            Command::PasteImage => self.background(|d| Event::ImagePasted(d.paste_image(now_ms()))),
+            Command::SendPrompt {
+                session,
+                source,
+                text,
+            } => {
+                self.in_flight += 1;
+                self.background(move |d| Event::PromptSent(d.prompt(&session, &source, &text)));
+            }
             Command::OpenUrl(url) => {
                 let _ = std::process::Command::new(OPENER)
                     .arg(url)
@@ -71,6 +90,14 @@ impl Runner {
             Command::Quit => return true,
         }
         false
+    }
+
+    /// Runs `call` on a thread; its event comes back through the loop.
+    fn background(&self, call: impl FnOnce(&dyn Backend) -> Event + Send + 'static) {
+        let (decide, tx) = (self.decide.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let _ = tx.send(call(&*decide));
+        });
     }
 
     fn reload(&mut self) {
@@ -115,6 +142,7 @@ fn spawn_keys(tx: mpsc::Sender<Event>, stop: Arc<AtomicBool>) {
             }
             let sent = match event::read() {
                 Ok(TermEvent::Key(k)) => keys::map(k).map_or(Ok(()), |k| tx.send(Event::Key(k))),
+                Ok(TermEvent::Paste(text)) => tx.send(Event::Paste(text)),
                 Ok(TermEvent::Resize(..)) => tx.send(Event::Tick),
                 Ok(_) => Ok(()),
                 Err(_) => break,
@@ -145,7 +173,7 @@ fn watch(dir: PathBuf, tx: mpsc::Sender<Event>) -> Option<Debouncer<RecommendedW
     Some(debouncer)
 }
 
-pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
+pub fn run(cfg: &crate::config::Config, demo: bool, prompt: bool) -> ExitCode {
     let (backend, reload_every): (Arc<dyn Backend>, Duration) = if demo {
         (Arc::new(Demo::new(cfg.icons)), DEMO_RELOAD_EVERY)
     } else {
@@ -163,6 +191,8 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
     }
     let stop = Arc::new(AtomicBool::new(false));
     let mut terminal = ratatui::init();
+    // A paste comes in one piece, so a dragged file's path can attach the image it names.
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     spawn_keys(tx.clone(), stop.clone());
     let _watcher = if demo {
         None
@@ -186,6 +216,13 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
         reload_again: false,
     };
     runner.reload();
+    if prompt {
+        let mut first = Vec::new();
+        app::open_prompt(&mut s, &mut first);
+        for cmd in first {
+            runner.run(cmd);
+        }
+    }
 
     let mut last_frame = Instant::now();
     let mut next_tick = Instant::now() + Duration::from_secs(1);
@@ -235,7 +272,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
             match &ev {
                 Event::Key(_) => fx.finish(),
                 Event::Loaded(_) => runner.loaded(),
-                Event::Sent { .. } => runner.in_flight -= 1,
+                Event::Sent { .. } | Event::PromptSent(_) => runner.in_flight -= 1,
                 _ => {}
             }
             for cmd in app::update(&mut s, ev, now_ms()) {
@@ -250,7 +287,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
     let deadline = Instant::now() + SEND_WAIT;
     while runner.in_flight > 0 {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(ev @ Event::Sent { .. }) => {
+            Ok(ev @ (Event::Sent { .. } | Event::PromptSent(_))) => {
                 runner.in_flight -= 1;
                 app::update(&mut s, ev, now_ms());
             }
@@ -258,6 +295,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool) -> ExitCode {
             Err(_) => break,
         }
     }
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
 
     let mut failed: Vec<_> = s.failed.iter().collect();

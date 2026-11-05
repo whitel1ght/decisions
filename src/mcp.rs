@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::config::{Config, Mode};
+use crate::sessions::{self, Session};
 use crate::store::{New, NewAnswer, Outcome, Store, is_key};
 
 const PROTOCOL: &str = "2025-06-18";
@@ -38,6 +40,9 @@ struct Server<W: Write> {
     /// Per id, how many discussion entries there were when an ask-back was last reported.
     reported: Mutex<HashMap<String, usize>>,
     closed: AtomicBool,
+    /// The session to list for the deck and the folder it goes in, until the client names itself.
+    registering: Mutex<Option<(Session, PathBuf)>>,
+    registered: Mutex<Option<PathBuf>>,
 }
 
 fn tools() -> Value {
@@ -127,6 +132,26 @@ impl<W: Write> Server<W> {
         }
     }
 
+    /// Lists this session for the deck's prompt line; it stays usable if that fails.
+    fn register(&self, client: &str) {
+        let Some((mut session, dir)) = self.registering.lock().ok().and_then(|mut r| r.take())
+        else {
+            return;
+        };
+        session.client = client.to_string();
+        if let (Ok(path), Ok(mut done)) =
+            (sessions::register(&dir, &session), self.registered.lock())
+        {
+            *done = Some(path);
+        }
+    }
+
+    fn unregister(&self) {
+        if let Some(path) = self.registered.lock().ok().and_then(|mut r| r.take()) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     fn source(&self) -> String {
         let client = self.client.lock().map(|c| c.clone()).unwrap_or_default();
         let mut s = format!(
@@ -148,6 +173,7 @@ impl<W: Write> Server<W> {
                 {
                     *c = name.to_string();
                 }
+                self.register(params["clientInfo"]["name"].as_str().unwrap_or("agent"));
                 let asked = params["protocolVersion"].as_str().unwrap_or(PROTOCOL);
                 let version = if SUPPORTED.contains(&asked) {
                     asked
@@ -341,11 +367,19 @@ pub fn serve<R: BufRead, W: Write + Send + 'static>(
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_default();
-    let owner = owner_id(
-        |k| std::env::var(k).ok(),
-        std::os::unix::process::parent_id(),
-    );
-    serve_with(input, output, cfg, PING_EVERY, cwd, owner)
+    let parent = std::os::unix::process::parent_id();
+    let owner = owner_id(|k| std::env::var(k).ok(), parent);
+    // A pi subagent's server serves nobody the user can talk to.
+    let session = std::env::var_os("PI_SUBAGENT").is_none().then(|| Session {
+        owner: owner.clone(),
+        pid: parent,
+        cwd: std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        name: cfg.session.clone().unwrap_or_default(),
+        ..Session::default()
+    });
+    serve_as(input, output, cfg, PING_EVERY, cwd, owner, session)
 }
 
 /// `DECISIONS_OWNER`, else `CLAUDE_CODE_SESSION_ID`, else `pid:<parent pid>`.
@@ -364,7 +398,22 @@ pub fn serve_with<R: BufRead, W: Write + Send + 'static>(
     cwd_name: String,
     owner: String,
 ) -> std::io::Result<()> {
+    serve_as(input, output, cfg, ping_every, cwd_name, owner, None)
+}
+
+/// `session`: what to register once the client names itself, so the deck can reach it.
+fn serve_as<R: BufRead, W: Write + Send + 'static>(
+    input: R,
+    output: W,
+    cfg: &Config,
+    ping_every: Duration,
+    cwd_name: String,
+    owner: String,
+    session: Option<Session>,
+) -> std::io::Result<()> {
     let server = Arc::new(Server {
+        registering: Mutex::new(session.map(|s| (s, cfg.dir.clone()))),
+        registered: Mutex::new(None),
         store: cfg.store(),
         mode: cfg.mode,
         wait: cfg.wait,
@@ -407,6 +456,7 @@ pub fn serve_with<R: BufRead, W: Write + Send + 'static>(
     for w in workers {
         let _ = w.join();
     }
+    server.unregister();
     Ok(())
 }
 
@@ -439,6 +489,56 @@ mod tests {
             session: None,
             telegram: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_session_is_listed_once_its_client_is_known_and_gone_when_the_server_ends() {
+        let c = cfg(1, Mode::Always);
+        let dir = c.dir.clone();
+        let (a, mut b) = UnixStream::pair().unwrap();
+        let session = Session {
+            owner: "owner-1".into(),
+            pid: std::process::id(),
+            cwd: "/x/repo".into(),
+            ..Session::default()
+        };
+        let srv = std::thread::spawn(move || {
+            serve_as(
+                BufReader::new(a.try_clone().unwrap()),
+                a,
+                &c,
+                Duration::from_millis(100),
+                "repo".into(),
+                "owner-1".into(),
+                Some(session),
+            )
+            .unwrap();
+        });
+        assert!(sessions::registered(&dir).is_empty());
+        let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "claude-code"}}});
+        writeln!(b, "{init}").unwrap();
+        let mut reply = String::new();
+        BufReader::new(b.try_clone().unwrap())
+            .read_line(&mut reply)
+            .unwrap();
+        let list = sessions::registered(&dir);
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            (list[0].owner.as_str(), list[0].client.as_str()),
+            ("owner-1", "claude-code")
+        );
+        b.shutdown(std::net::Shutdown::Both).unwrap();
+        srv.join().unwrap();
+        assert!(sessions::registered(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_server_with_no_session_lists_nothing() {
+        let c = cfg(1, Mode::Always);
+        let (cl, srv) = Client::start(&c);
+        assert!(sessions::registered(&c.dir).is_empty());
+        drop(cl);
+        srv.join().unwrap();
     }
 
     struct Client {

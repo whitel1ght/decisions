@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
-use crate::store::{Event, New, NewAnswer, Outcome};
-use crate::{hook, mcp, setup, stats, tui};
+use crate::store::{Event, New, NewAnswer, NewPrompt, Outcome};
+use crate::{hook, mcp, sessions, setup, stats, tui};
 
 #[derive(Parser)]
 #[command(
@@ -22,6 +22,9 @@ pub struct Cli {
     /// Open the deck on a made-up queue held in memory; nothing is read or written
     #[arg(long)]
     pub demo: bool,
+    /// Open the deck with the prompt line open, to message a running session
+    #[arg(long)]
+    pub prompt: bool,
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
 }
@@ -115,6 +118,17 @@ pub enum Cmd {
         #[arg(long)]
         timeout: Option<u64>,
     },
+    /// The running sessions a prompt can reach
+    Sessions {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a running session a message (its name, directory or id); prints the card its reply lands on
+    Prompt {
+        session: String,
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
     /// How to register the MCP server in a harness: claude, codex, gemini, opencode, pi, cursor, generic
     Setup { harness: String },
     /// Send open decisions to your Telegram chat while you're away, and answer from there
@@ -144,7 +158,7 @@ fn told(cfg: &Config, r: crate::store::Result<Event>) -> ExitCode {
 pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
     let store = cfg.store();
     let Some(cmd) = cli.cmd else {
-        return tui::run(cfg, cli.demo);
+        return tui::run(cfg, cli.demo, cli.prompt);
     };
     match cmd {
         Cmd::Mcp => match mcp::serve(std::io::stdin().lock(), std::io::stdout(), cfg) {
@@ -299,6 +313,46 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
                         return ExitCode::from(o.exit_code());
                     }
                 }
+            }
+        }
+        Cmd::Sessions { json } => {
+            let list = sessions::running(&cfg.dir);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&list).unwrap_or_default()
+                );
+            } else {
+                for s in &list {
+                    println!(
+                        "{} · {} · {} · {} · {}",
+                        s.label(),
+                        s.client,
+                        s.dir_name(),
+                        if s.state.is_empty() { "-" } else { &s.state },
+                        s.owner
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Cmd::Prompt { session, text } => {
+            let list = sessions::running(&cfg.dir);
+            let sent = sessions::resolve(&list, &session).and_then(|s| {
+                store
+                    .add_prompt(NewPrompt {
+                        session: s.owner.clone(),
+                        source: format!("prompt · {}", s.label()),
+                        text: text.join(" "),
+                    })
+                    .map_err(|e| e.0)
+            });
+            match sent {
+                Ok(id) => {
+                    println!("{id}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => refused(e),
             }
         }
         Cmd::Telegram { cmd } => crate::telegram::run(cmd, cfg),

@@ -62,6 +62,7 @@ fn card(
         mr_short,
         source: "demo".into(),
         kind: String::new(),
+        prompt: false,
         question: question.into(),
         asked: iso(asked),
         blocks: blocks.into(),
@@ -406,6 +407,86 @@ impl Backend for Demo {
         d.discussion.push(entry("you", text));
         s.replies.push((due, id.to_string()));
         Ok(None)
+    }
+
+    fn sessions(&self) -> Vec<crate::sessions::Session> {
+        use crate::sessions::Session;
+        [
+            (
+                "demo-1",
+                "the system",
+                "claude-code",
+                "/demo/dotfiles",
+                "working",
+            ),
+            (
+                "demo-2",
+                "ACME-1004",
+                "claude-code",
+                "/demo/dashboard",
+                "idle",
+            ),
+            ("demo-3", "ACME-1009", "pi", "/demo/backend", ""),
+        ]
+        .map(|(owner, name, client, cwd, state)| Session {
+            owner: owner.into(),
+            name: name.into(),
+            client: client.into(),
+            cwd: cwd.into(),
+            state: state.into(),
+            ..Session::default()
+        })
+        .to_vec()
+    }
+
+    fn last_target(&self) -> Option<String> {
+        None
+    }
+
+    fn save_target(&self, _owner: &str) {}
+
+    fn files(&self, _cwd: &str) -> Vec<String> {
+        [
+            "src/components/FilterBar.vue",
+            "src/components/FilterChip.vue",
+            "src/components/",
+            "src/main.ts",
+            "README.md",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    fn paste_image(&self, _stamp: i64) -> Result<crate::prompt::Image, String> {
+        Err("demo: no clipboard here".into())
+    }
+
+    fn prompt(&self, _session: &str, source: &str, text: &str) -> Result<String, String> {
+        let mut s = self
+            .state
+            .lock()
+            .map_err(|_| "demo: state poisoned".to_string())?;
+        let id = format!("D-{}", 100 + s.open.len() + s.replies.len());
+        let due = (self.clock)() + REPLY_AFTER_MS;
+        s.open.push(Decision {
+            id: id.clone(),
+            key: String::new(),
+            mr: String::new(),
+            mr_short: String::new(),
+            source: source.into(),
+            kind: "answer".into(),
+            prompt: true,
+            question: text.into(),
+            asked: chrono::Local::now().to_rfc3339(),
+            blocks: String::new(),
+            question_back: true,
+            options: Vec::new(),
+            recommended: None,
+            context: String::new(),
+            discussion: vec![entry("you", text)],
+        });
+        s.replies.push((due, id.clone()));
+        Ok(id)
     }
 }
 

@@ -13,11 +13,13 @@ use serde_json::{Value, json};
 
 use crate::queue::{Decision, Entry, Opt};
 
-const FIELDS: [&str; 10] = [
-    "id", "day", "key", "mr", "asked", "blocks", "status", "source", "kind", "session",
+const FIELDS: [&str; 11] = [
+    "id", "day", "key", "mr", "asked", "blocks", "status", "source", "kind", "origin", "session",
 ];
 /// `kind` of a card that reports an answer to the user's question; questions have none.
 pub const ANSWER: &str = "answer";
+/// `origin` of an answer card the user opened with a message to a session.
+pub const PROMPT: &str = "prompt";
 const SECTIONS: [&str; 5] = ["Question", "Context", "Options", "Discussion", "Answer"];
 const REC: &str = " (recommended)";
 const RECENT_HOURS: i64 = 12;
@@ -243,7 +245,7 @@ fn parse(text: &str) -> Result<Doc> {
 fn render(doc: &Doc) -> String {
     let mut out = String::from("---\n");
     for k in FIELDS {
-        if matches!(k, "source" | "kind" | "session") && doc.get(k).is_empty() {
+        if matches!(k, "source" | "kind" | "session" | "origin") && doc.get(k).is_empty() {
             continue;
         }
         out.push_str(&format!("{k}: {}\n", scalar(doc.get(k))));
@@ -435,6 +437,14 @@ pub struct NewAnswer {
     pub session: String,
 }
 
+/// A message from the user to a running session.
+#[derive(Debug, Clone, Default)]
+pub struct NewPrompt {
+    pub session: String,
+    pub source: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Event {
     pub event: &'static str,
@@ -588,6 +598,7 @@ impl Store {
             mr_short: mr_short(d.get("mr"), &self.mr_strip),
             source: d.get("source").into(),
             kind: d.get("kind").into(),
+            prompt: d.get("origin") == PROMPT,
             question: one_line(d.section("Question")),
             asked: d.get("asked").into(),
             blocks: d.get("blocks").into(),
@@ -887,6 +898,33 @@ impl Store {
         doc.set("session", one_line(&n.session));
         doc.set_section("Question", question);
         doc.set_section("Context", answer);
+        write_atomic(&self.dir.join(format!("{id}.md")), &render(&doc))?;
+        Ok(id)
+    }
+
+    /// The user's message to a running session: an answer card with nothing answered yet and
+    /// the message as its first follow-up, so it travels like any other follow-up.
+    pub fn add_prompt(&self, n: NewPrompt) -> Result<String> {
+        let _lock = self.lock()?;
+        let (text, session) = (one_line(&n.text), one_line(&n.session));
+        if text.is_empty() {
+            return fail("the message is empty");
+        }
+        if session.is_empty() {
+            return fail("no session to send it to");
+        }
+        let (id, t) = (self.next_id(), now());
+        let mut doc = Doc::default();
+        doc.set("id", id.clone());
+        doc.set("day", t.format("%Y-%m-%d").to_string());
+        doc.set("asked", iso(t));
+        doc.set("status", "open");
+        doc.set("source", one_line(&n.source));
+        doc.set("kind", ANSWER);
+        doc.set("origin", PROMPT);
+        doc.set("session", session);
+        doc.set_section("Question", text.clone());
+        doc.discuss("you", &text)?;
         write_atomic(&self.dir.join(format!("{id}.md")), &render(&doc))?;
         Ok(id)
     }
@@ -1751,5 +1789,59 @@ mod tests {
         s.ask("D-1", "why?").unwrap();
         s.reply("D-1", "because").unwrap();
         assert_eq!(s.discussion_count("D-1").unwrap(), 2);
+    }
+
+    fn prompt(text: &str, session: &str) -> NewPrompt {
+        NewPrompt {
+            session: session.into(),
+            source: "prompt · the system".into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn a_prompt_is_an_answer_card_with_the_message_waiting_as_a_follow_up() {
+        let s = store();
+        let id = s.add_prompt(prompt("how far\nalong?", "o1")).unwrap();
+        let json = s.list_json();
+        assert_eq!(json[0]["kind"], "answer");
+        assert_eq!(json[0]["prompt"], true);
+        assert_eq!(json[0]["session"], "o1");
+        assert_eq!(json[0]["followup"], "how far along?");
+        assert_eq!(json[0]["discussion_count"], 1);
+        let (list, _) = s.list();
+        assert!(list[0].prompt && list[0].is_answer());
+        s.reply(&id, "six of nine").unwrap();
+        assert_eq!(s.list_json()[0]["followup"], "");
+        assert!(s.seen(&id).is_ok());
+    }
+
+    #[test]
+    fn an_ordinary_answer_card_is_not_a_prompt() {
+        let s = store();
+        s.add_answer(NewAnswer {
+            question: "Why?".into(),
+            answer: "Because.".into(),
+            ..NewAnswer::default()
+        })
+        .unwrap();
+        assert_eq!(s.list_json()[0]["prompt"], false);
+        assert!(!s.show("D-1").unwrap().contains("origin"));
+    }
+
+    #[test]
+    fn a_prompt_needs_a_message_and_a_session() {
+        let s = store();
+        assert!(s.add_prompt(prompt("  ", "o1")).is_err());
+        assert!(s.add_prompt(prompt("hi", " ")).is_err());
+        assert_eq!(s.list_json().as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn two_prompts_with_the_same_words_are_two_cards() {
+        let s = store();
+        let a = s.add_prompt(prompt("status?", "o1")).unwrap();
+        let b = s.add_prompt(prompt("status?", "o1")).unwrap();
+        assert_ne!(a, b);
     }
 }
