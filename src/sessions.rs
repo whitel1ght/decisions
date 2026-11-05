@@ -1,6 +1,7 @@
 //! The running sessions a prompt from the deck can reach. Each `decisions mcp` server registers
 //! the session it serves under `<dir>/sessions/`; the file goes when the server exits, and a
-//! reader drops one whose harness process is gone. Claude Code's own list adds names and states.
+//! reader drops one whose harness process is gone. Claude Code's own list adds names and states,
+//! and any session of its that is not registered.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -116,6 +117,11 @@ pub fn registered(dir: &Path) -> Vec<Session> {
 pub struct Agent {
     #[serde(default)]
     pub pid: u32,
+    /// The session's id now; `/clear` changes it.
+    #[serde(default, rename = "sessionId")]
+    pub session_id: String,
+    #[serde(default)]
+    pub cwd: String,
     #[serde(default)]
     pub name: String,
     /// A background session's progress.
@@ -139,8 +145,10 @@ fn state_label(a: &Agent) -> String {
     }
 }
 
-/// Names and states from Claude Code's list. A Claude session missing from a list that could be
-/// read is a headless run (`claude -p`), which nobody can talk to: it is left out.
+/// Claude Code's own list gives names and states. A registered Claude session missing from a list
+/// that could be read is a headless run (`claude -p`), which nobody can talk to: it is left out.
+/// A session on the list with no registration, whose MCP server is older than the registry, joins
+/// under its current id, which its harness side matches.
 pub fn merge(mut list: Vec<Session>, agents: Option<&[Agent]>) -> Vec<Session> {
     if let Some(agents) = agents {
         list.retain_mut(|s| {
@@ -156,6 +164,20 @@ pub fn merge(mut list: Vec<Session>, agents: Option<&[Agent]>) -> Vec<Session> {
             s.state = state_label(a);
             true
         });
+        for a in agents {
+            if a.session_id.is_empty() || list.iter().any(|s| s.pid == a.pid) {
+                continue;
+            }
+            list.push(Session {
+                owner: a.session_id.clone(),
+                pid: a.pid,
+                client: "claude-code".into(),
+                cwd: a.cwd.clone(),
+                name: a.name.clone(),
+                state: state_label(a),
+                ..Session::default()
+            });
+        }
     }
     list.sort_by_key(|s| s.label().to_lowercase());
     list
@@ -176,13 +198,7 @@ fn claude_agents() -> Option<Vec<Agent>> {
 
 /// The sessions a prompt can reach now.
 pub fn running(dir: &Path) -> Vec<Session> {
-    let list = registered(dir);
-    let agents = list
-        .iter()
-        .any(Session::is_claude)
-        .then(claude_agents)
-        .flatten();
-    merge(list, agents.as_deref())
+    merge(registered(dir), claude_agents().as_deref())
 }
 
 /// The session `query` names: its owner id, its name, or the only one whose name or directory
@@ -312,6 +328,41 @@ mod tests {
         let got = merge(list, Some(&agents));
         let rows: Vec<_> = got.iter().map(|s| (s.label(), s.state.as_str())).collect();
         assert_eq!(rows, [("backend", ""), ("the system", "idle")]);
+    }
+
+    #[test]
+    fn a_claude_session_with_no_registration_joins_under_its_current_id() {
+        let agents: Vec<Agent> = serde_json::from_str(
+            r#"[{"pid":72044,"id":"bf391880","cwd":"/x/projects","kind":"background",
+                 "sessionId":"now-id","name":"the system","status":"busy","state":"working"},
+                {"pid":9,"name":"no id yet"}]"#,
+        )
+        .unwrap();
+        let got = merge(Vec::new(), Some(&agents));
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            (
+                got[0].owner.as_str(),
+                got[0].label(),
+                got[0].client.as_str(),
+                got[0].dir_name(),
+                got[0].state.as_str()
+            ),
+            ("now-id", "the system", "claude-code", "projects", "working")
+        );
+    }
+
+    #[test]
+    fn a_registered_session_keeps_its_owner_and_is_not_listed_twice() {
+        let list = vec![session("started-as", 10, "claude-code", "/x/dotfiles")];
+        let agents = [Agent {
+            pid: 10,
+            session_id: "after-clear".into(),
+            ..Agent::default()
+        }];
+        let got = merge(list, Some(&agents));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].owner, "started-as");
     }
 
     #[test]

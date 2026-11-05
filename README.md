@@ -123,7 +123,9 @@ while the deck stays open.
   attaches it too. On Linux `^v` needs `wl-paste` or `xclip`.
 
 Each `decisions mcp` server lists its session under `DECISIONS_DIR/sessions/` while it runs, so a
-session appears once it has connected, and subagents and `claude -p` runs do not.
+session appears once it has connected, and subagents and `claude -p` runs do not. Claude Code
+sessions also appear from `claude agents --json`, so one started before it had a server that
+registers is reachable too; other harnesses need a restart for that.
 
 A message reaches a session the way a follow-up does, so the session needs something that turns
 it into a prompt. There is none in this repo: the harness side lists open answer cards with
