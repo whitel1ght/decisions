@@ -609,6 +609,7 @@ impl Store {
             prompt: d.get("origin") == PROMPT,
             waiting: false,
             session: d.get("session").into(),
+            color: String::new(),
             question: one_line(d.section("Question")),
             asked: d.get("asked").into(),
             blocks: d.get("blocks").into(),

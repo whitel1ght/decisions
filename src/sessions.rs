@@ -3,12 +3,17 @@
 //! reader drops one whose harness process is gone. Claude Code's own list adds names and states,
 //! and any session of its that is not registered.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::store::write_atomic;
+
+const AGENTS_WITHIN: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -25,6 +30,9 @@ pub struct Session {
     pub name: String,
     #[serde(default)]
     pub state: String,
+    /// Its id now, from Claude Code's list: `/clear` changes it, and `owner` stays.
+    #[serde(default, skip_serializing)]
+    pub current: String,
 }
 
 impl Session {
@@ -162,6 +170,7 @@ pub fn merge(mut list: Vec<Session>, agents: Option<&[Agent]>) -> Vec<Session> {
                 s.name = a.name.clone();
             }
             s.state = state_label(a);
+            s.current = a.session_id.clone();
             true
         });
         for a in agents {
@@ -175,6 +184,7 @@ pub fn merge(mut list: Vec<Session>, agents: Option<&[Agent]>) -> Vec<Session> {
                 cwd: a.cwd.clone(),
                 name: a.name.clone(),
                 state: state_label(a),
+                current: a.session_id.clone(),
                 ..Session::default()
             });
         }
@@ -183,17 +193,36 @@ pub fn merge(mut list: Vec<Session>, agents: Option<&[Agent]>) -> Vec<Session> {
     list
 }
 
-fn claude_agents() -> Option<Vec<Agent>> {
-    let out = Command::new("claude")
-        .args(["agents", "--json"])
+/// What `command` prints, or None if it fails or takes longer than `limit`. The deck's list waits
+/// on this, and a hung command must not keep the cards from showing.
+fn output_within(mut command: Command, limit: Duration) -> Option<Vec<u8>> {
+    let mut child = command
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .spawn()
         .ok()?;
-    if !out.status.success() {
-        return None;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        let _ = tx.send(out);
+    });
+    match rx.recv_timeout(limit) {
+        Ok(out) => child.wait().ok()?.success().then_some(out),
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
     }
-    serde_json::from_slice(&out.stdout).ok()
+}
+
+fn claude_agents() -> Option<Vec<Agent>> {
+    let mut command = Command::new("claude");
+    command.args(["agents", "--json"]);
+    serde_json::from_slice(&output_within(command, AGENTS_WITHIN)?).ok()
 }
 
 /// The sessions a prompt can reach now.
@@ -251,6 +280,25 @@ pub fn save_target(dir: &Path, owner: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sh(script: &str) -> Command {
+        let mut c = Command::new("sh");
+        c.args(["-c", script]);
+        c
+    }
+
+    #[test]
+    fn a_command_that_hangs_or_fails_gives_nothing() {
+        let limit = Duration::from_secs(5);
+        assert_eq!(output_within(sh("echo hi"), limit), Some(b"hi\n".to_vec()));
+        assert_eq!(output_within(sh("exit 3"), limit), None);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            output_within(sh("exec sleep 30"), Duration::from_millis(100)),
+            None
+        );
+        assert!(start.elapsed() < limit, "{:?}", start.elapsed());
+    }
 
     fn dir(name: &str) -> PathBuf {
         let d =

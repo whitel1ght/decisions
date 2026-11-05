@@ -163,7 +163,10 @@ message when the turn ends.
 | `?` | all the keys |
 | `q / esc` | send pending answers and close |
 
-Each card's border turns blue → yellow → orange → red as it waits.
+A card's border has its session's colour, so you can tell at a glance who is asking: the one set
+with `/color` in Claude Code, or else one the deck assigns the session and keeps, avoiding colours
+other open cards use. A card with no session has a quiet grey-blue border. The ⏱ timer turns blue →
+yellow → orange → red as the card waits.
 
 ## Telegram
 

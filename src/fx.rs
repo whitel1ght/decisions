@@ -93,25 +93,24 @@ impl Fx {
                         .add_unique_effect(FxKey::Edge(id.clone()), glow.with_area(r));
                 }
             }
-            Anim::AgeBand { id, from, to } => {
+            Anim::AgeBand { id, to, .. } => {
                 let target = if areas.current.as_deref() == Some(id.as_str()) {
                     Some(card)
                 } else {
                     edge(id)
                 };
                 if let Some(r) = target {
-                    let fade =
-                        fx::fade_from_fg(theme::band_color(*from), (1000, Interpolation::Linear));
+                    // The border is the session's: a card that ages only brightens it.
+                    let pulse = || {
+                        fx::ping_pong(fx::hsl_shift_fg(
+                            [0.0, 0.0, 20.0],
+                            (300, Interpolation::SineInOut),
+                        ))
+                    };
                     let effect = if *to == Band::Stale {
-                        fx::sequence(&[
-                            fade,
-                            fx::ping_pong(fx::hsl_shift_fg(
-                                [0.0, 0.0, 20.0],
-                                (300, Interpolation::SineInOut),
-                            )),
-                        ])
+                        fx::sequence(&[pulse(), pulse()])
                     } else {
-                        fade
+                        pulse()
                     };
                     self.mgr.add_unique_effect(
                         FxKey::Age(id.clone()),

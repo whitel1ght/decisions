@@ -1,5 +1,6 @@
 pub mod app;
 pub mod cli;
+pub mod colors;
 pub mod config;
 pub mod demo;
 pub mod fx;

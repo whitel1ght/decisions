@@ -1,5 +1,6 @@
 //! The deck's backend for the real queue: the store in process, plus the on_answer hook.
 
+use crate::colors;
 use crate::config::Config;
 use crate::hook;
 use crate::prompt::{self, Image};
@@ -31,7 +32,9 @@ impl Live {
 
 impl Backend for Live {
     fn list(&self) -> Result<Vec<Decision>, String> {
-        Ok(self.store.list().0)
+        let mut list = self.store.list().0;
+        colors::paint(&self.dir, &mut list);
+        Ok(list)
     }
 
     fn answer(&self, id: &str, n: u8, note: Option<&str>) -> Result<Option<String>, String> {

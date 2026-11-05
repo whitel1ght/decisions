@@ -13,6 +13,8 @@ pub const ORANGE: Color = Color::Rgb(0xff, 0x9e, 0x64);
 pub const RED: Color = Color::Rgb(0xf7, 0x76, 0x8e);
 pub const LAVENDER: Color = Color::Rgb(0xbb, 0x9a, 0xf7);
 pub const GREEN: Color = Color::Rgb(0x9e, 0xce, 0x6a);
+pub const CYAN: Color = Color::Rgb(0x7d, 0xcf, 0xff);
+pub const PINK: Color = Color::Rgb(0xff, 0x8f, 0xc7);
 pub const SELECT: Color = Color::Rgb(0x2e, 0x3c, 0x64);
 pub const CODE: Color = Color::Rgb(0x9a, 0xa5, 0xce);
 
@@ -23,6 +25,21 @@ pub fn band_color(b: Band) -> Color {
         Band::Old => ORANGE,
         Band::Stale => RED,
     }
+}
+
+/// A session's colour, by the names Claude Code's `/color` takes.
+pub fn session_color(name: &str) -> Option<Color> {
+    Some(match name {
+        "red" => RED,
+        "orange" => ORANGE,
+        "yellow" => YELLOW,
+        "green" => GREEN,
+        "cyan" => CYAN,
+        "blue" => BLUE,
+        "purple" => LAVENDER,
+        "pink" => PINK,
+        _ => return None,
+    })
 }
 
 /// The glyphs the deck and `count --badge` draw: text ones, or Nerd Font (Font Awesome)
@@ -84,6 +101,15 @@ mod tests {
             [Band::Fresh, Band::Warm, Band::Old, Band::Stale].map(band_color),
             [BLUE, YELLOW, ORANGE, RED]
         );
+    }
+
+    #[test]
+    fn every_colour_the_deck_assigns_can_be_drawn() {
+        for name in crate::colors::ASSIGNED {
+            assert!(session_color(name).is_some(), "{name}");
+        }
+        assert_eq!(session_color("purple"), Some(LAVENDER));
+        assert_eq!(session_color("default"), None);
     }
 
     #[test]

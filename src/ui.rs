@@ -297,6 +297,11 @@ fn deck_draw(f: &mut Frame, s: &State, deck: Rect, drawn: &mut Drawn) {
     }
 }
 
+/// A card wears its session's colour; one with no session a quiet one. Age is on its timer.
+fn card_color(d: &Decision) -> Color {
+    theme::session_color(&d.color).unwrap_or(theme::CODE)
+}
+
 fn edge(f: &mut Frame, s: &State, d: &Decision, rect: Rect, more: Option<usize>) {
     let age = s.age_ms(d);
     let mut label = format!(" {} · {} ", d.id, age_label(age));
@@ -306,7 +311,7 @@ fn edge(f: &mut Frame, s: &State, d: &Decision, rect: Rect, more: Option<usize>)
     let fill = usize::from(rect.width).saturating_sub(label.chars().count() + 3);
     let line = format!("╰{}{label}─╯", "─".repeat(fill));
     f.render_widget(
-        Paragraph::new(line).style(Style::new().fg(theme::band_color(band(age)))),
+        Paragraph::new(line).style(Style::new().fg(card_color(d))),
         rect,
     );
 }
@@ -613,9 +618,15 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
             Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
         ));
     }
-    let block = card_block(theme::band_color(band(age)))
+    let block = card_block(card_color(d))
         .title(Line::from(title))
-        .title_top(Line::from(format!(" {} {} ", s.icons.age, age_label(age))).right_aligned());
+        .title_top(
+            Line::styled(
+                format!(" {} {} ", s.icons.age, age_label(age)),
+                Style::new().fg(theme::band_color(band(age))),
+            )
+            .right_aligned(),
+        );
     if d.is_answer() {
         return answer_front(f, s, d, rect, block);
     }
@@ -792,7 +803,7 @@ fn thread(s: &State, d: &Decision, width: u16) -> Vec<Line<'static>> {
 
 /// Draws the back; returns how far it can scroll.
 fn back(f: &mut Frame, s: &State, d: &Decision, rect: Rect) -> u16 {
-    let block = card_block(theme::band_color(band(s.age_ms(d)))).padding(Padding::horizontal(1));
+    let block = card_block(card_color(d)).padding(Padding::horizontal(1));
     let (body, field) = split_input(s, block.inner(rect));
     let width = body.width;
     let mut lines = markdown::render(&d.context, width);
@@ -1120,18 +1131,47 @@ mod tests {
     }
 
     #[test]
-    fn the_card_border_takes_the_colour_of_its_age() {
+    fn the_timer_takes_the_colour_of_the_cards_age_and_the_border_does_not_change() {
+        let mut list = fixture();
+        list[0].color = "pink".into();
         for (mins, colour) in [
             (5, theme::BLUE),
             (20, theme::YELLOW),
             (120, theme::ORANGE),
             (240, theme::RED),
         ] {
-            let s = state(fixture(), T0 + mins * MIN);
+            let s = state(list.clone(), T0 + mins * MIN);
             let (buf, d) = render(&s, 80, 24);
             let c = d.areas.card;
             assert_eq!(buf[(c.x, c.y)].symbol(), "╭");
-            assert_eq!(buf[(c.x, c.y)].fg, colour, "{mins}m");
+            assert_eq!(buf[(c.x, c.y)].fg, theme::PINK, "{mins}m");
+            let (x, y) = find(&buf, s.icons.age);
+            assert_eq!(buf[(x, y)].fg, colour, "{mins}m");
+        }
+    }
+
+    #[test]
+    fn each_side_and_the_stack_wear_the_sessions_colour() {
+        let mut list = fixture();
+        list[0].color = "cyan".into();
+        list[1].color = "pink".into();
+        let mut s = state(list, T0);
+        let (buf, d) = render(&s, 80, 30);
+        let (_, edge) = d.areas.edges[0].clone();
+        assert_eq!(buf[(edge.x, edge.y)].fg, theme::PINK, "the card behind");
+        s.side = app::Side::Back;
+        let (buf, d) = render(&s, 80, 30);
+        let c = d.areas.card;
+        assert_eq!(buf[(c.x, c.y)].fg, theme::CYAN, "the back");
+    }
+
+    #[test]
+    fn a_card_with_no_session_is_quiet_at_any_age() {
+        for mins in [5, 240] {
+            let s = state(fixture(), T0 + mins * MIN);
+            let (buf, d) = render(&s, 80, 24);
+            let c = d.areas.card;
+            assert_eq!(buf[(c.x, c.y)].fg, theme::CODE, "{mins}m");
         }
     }
 

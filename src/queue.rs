@@ -48,6 +48,9 @@ pub struct Decision {
     /// The session that wrote it, or that a message on it went to.
     #[serde(default)]
     pub session: String,
+    /// The name of that session's colour; the deck's backend fills it in.
+    #[serde(default, skip_serializing)]
+    pub color: String,
     pub question: String,
     pub asked: String,
     #[serde(default)]

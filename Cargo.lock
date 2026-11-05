@@ -484,6 +484,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "memchr",
  "notify-debouncer-mini",
  "ratatui",
  "serde",

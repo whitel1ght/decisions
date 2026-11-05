@@ -65,6 +65,7 @@ fn card(
         prompt: false,
         waiting: false,
         session: String::new(),
+        color: String::new(),
         question: question.into(),
         asked: iso(asked),
         blocks: blocks.into(),
@@ -368,6 +369,8 @@ impl Backend for Demo {
         let mut list = s.open.clone();
         for d in &mut list {
             d.waiting = d.awaits_reply();
+            let n: usize = d.id.trim_start_matches("D-").parse().unwrap_or(0);
+            d.color = crate::colors::ASSIGNED[n % crate::colors::ASSIGNED.len()].into();
         }
         Ok(list)
     }
@@ -485,6 +488,7 @@ impl Backend for Demo {
             prompt: true,
             waiting: true,
             session: session.into(),
+            color: String::new(),
             question: text.into(),
             asked: chrono::Local::now().to_rfc3339(),
             blocks: String::new(),
