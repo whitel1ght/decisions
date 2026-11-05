@@ -162,11 +162,15 @@ fn header(s: &State) -> String {
         1 => counts.push("1 answer".into()),
         n => counts.push(format!("{n} answers")),
     }
+    let sent = match s.sent {
+        0 => String::new(),
+        n => format!("· {} {n} sent ", s.icons.waiting),
+    };
     match s.queue.len() {
         _ if !s.loaded => format!(" {name} · loading… "),
-        0 => format!(" {name} · nothing waiting "),
+        0 => format!(" {name} · nothing waiting {sent}"),
         _ => format!(
-            " {name} · {} · oldest {} ",
+            " {name} · {} · oldest {} {sent}",
             counts.join(" · "),
             age_label(s.oldest_ms())
         ),
@@ -597,9 +601,8 @@ fn front(f: &mut Frame, s: &State, d: &Decision, rect: Rect) {
         }
     }
     if d.is_answer() {
-        let sent = d.prompt && d.discussion.last().is_some_and(|e| e.who == "you");
         title.push(Span::styled(
-            if sent {
+            if d.prompt && d.awaits_reply() {
                 format!(" · {} sent", s.icons.waiting)
             } else {
                 format!(" · {} answer", s.icons.answer)
@@ -765,8 +768,8 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
     input_box(f, s, field);
 }
 
-/// An answer card's follow-ups and the session's replies, each led by who wrote it, then a
-/// waiting line while the last one is yours.
+/// An answer card's follow-ups and the session's replies, each led by who wrote it. A card whose
+/// last word is yours is on the stack only if its session has gone or has not replied for long.
 fn thread(s: &State, d: &Decision, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for e in &d.discussion {
@@ -791,7 +794,7 @@ fn thread(s: &State, d: &Decision, width: u16) -> Vec<Line<'static>> {
     }
     if d.discussion.last().is_some_and(|e| e.who == "you") {
         lines.push(Line::styled(
-            format!("{} waiting for the session's reply", s.icons.waiting),
+            format!("{} no reply from the session yet", s.icons.waiting),
             Style::new().fg(theme::MUTED),
         ));
     }
@@ -1671,13 +1674,13 @@ mod tests {
         assert!(answer < you && you < session && session < got);
         assert_eq!(buf[(x, you)].fg, theme::BLUE);
         let all = screen(&buf);
-        assert!(!all.contains("waiting for the session"), "{all}");
+        assert!(!all.contains("no reply from the session"), "{all}");
 
         d.discussion.push(said("you", "Can we quarantine it?"));
         d.question_back = true;
         let all = screen(&render(&state(vec![d], T0), 80, 24).0);
         assert!(all.contains("you: Can we quarantine it?"), "{all}");
-        assert!(all.contains("⧗ waiting for the session's reply"), "{all}");
+        assert!(all.contains("⧗ no reply from the session yet"), "{all}");
         assert!(
             !all.contains("↩ reply"),
             "the waiting line covers it:\n{all}"
@@ -1771,7 +1774,7 @@ mod tests {
             "else \u{f005}",
             "\u{f0e0} typing",
             "D-5 · pi · repo · \u{f0e0} answer",
-            "\u{f252} waiting for the session's reply",
+            "\u{f252} no reply from the session yet",
         ] {
             assert!(all.contains(want), "{want:?} missing:\n{all}");
         }
@@ -1893,6 +1896,20 @@ mod tests {
     }
 
     #[test]
+    fn the_header_counts_what_waits_on_a_session() {
+        let mut s = state(vec![], T0);
+        s.sent = 2;
+        let all = screen(&render(&s, 80, 24).0);
+        assert!(
+            all.contains("decisions · nothing waiting · ⧗ 2 sent"),
+            "{all}"
+        );
+        let mut s = state(vec![answer_card()], T0);
+        s.sent = 1;
+        assert!(screen(&render(&s, 110, 24).0).contains("· ⧗ 1 sent"));
+    }
+
+    #[test]
     fn a_prompt_card_shows_the_message_and_waits_for_the_reply() {
         let mut d = answer_card();
         d.prompt = true;
@@ -1907,7 +1924,7 @@ mod tests {
         let (buf, _) = render(&s, 110, 24);
         let all = screen(&buf);
         assert!(all.contains("you: how far along?"), "{all}");
-        assert!(all.contains("waiting for the session's reply"), "{all}");
+        assert!(all.contains("no reply from the session yet"), "{all}");
         assert!(all.contains("⧗ sent"), "{all}");
         assert!(!all.contains("you asked:"), "{all}");
     }

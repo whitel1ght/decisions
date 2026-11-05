@@ -42,6 +42,9 @@ pub struct Decision {
     /// An answer card opened by the user's own message to a session, from the prompt line.
     #[serde(default)]
     pub prompt: bool,
+    /// Nothing to do on it until its running session replies, so it stays out of the stack.
+    #[serde(default, skip_serializing)]
+    pub waiting: bool,
     pub question: String,
     pub asked: String,
     #[serde(default)]
@@ -62,6 +65,11 @@ impl Decision {
     /// A card reporting an answer to the user's question, not a question.
     pub fn is_answer(&self) -> bool {
         self.kind == "answer"
+    }
+
+    /// An answer card whose thread ends with the user's own words.
+    pub fn awaits_reply(&self) -> bool {
+        self.is_answer() && self.discussion.last().is_some_and(|e| e.who == "you")
     }
 
     /// When it was asked, in unix milliseconds; None when `asked` is not RFC 3339.

@@ -49,7 +49,13 @@ fn local(e: String) -> ApiError {
 }
 
 /// `on · away (idle 12m)`, then the open cards and whether each was sent.
+/// An answer card filed from here that a late reply brought back: it goes out again.
+fn reopened(d: &Decision, sent: &Sent) -> bool {
+    d.is_answer() && sent.done && sent.message_id != 0 && d.discussion.len() > sent.discussion_seen
+}
+
 pub fn summary(st: &State, open: &[Decision], idle_secs: Option<u64>, minutes: u64) -> String {
+    let open: Vec<&Decision> = open.iter().filter(|d| !d.waiting).collect();
     let idle = idle_secs.map_or("idle time unknown".to_string(), |s| {
         format!("idle {}", age_label(s as i64 * 1000))
     });
@@ -63,7 +69,7 @@ pub fn summary(st: &State, open: &[Decision], idle_secs: Option<u64>, minutes: u
         },
         open.len()
     );
-    for d in open {
+    for d in &open {
         let sent = if st.messages.contains_key(&d.id) {
             "sent"
         } else {
@@ -335,8 +341,12 @@ impl<A: Api> Bot<A> {
         }
         let now = (self.now)();
         for d in self.store.list().0 {
+            if d.waiting {
+                continue;
+            }
             if let Some(s) = st.messages.get(&d.id)
                 && (s.asked.is_empty() || (s.asked == d.asked && s.question == d.question))
+                && !reopened(&d, s)
             {
                 continue;
             }
@@ -355,7 +365,14 @@ impl<A: Api> Bot<A> {
                     Sent {
                         message_id,
                         done: sent.is_none(),
-                        discussion_seen: d.discussion.len(),
+                        // A card's message leaves its thread out, and an answer card may be
+                        // going out only now that the reply is in: what has not been forwarded
+                        // yet follows under it.
+                        discussion_seen: if d.is_answer() {
+                            st.messages.get(&d.id).map_or(0, |s| s.discussion_seen)
+                        } else {
+                            d.discussion.len()
+                        },
                         text,
                         html,
                         replies: vec![],
@@ -833,6 +850,97 @@ mod tests {
             t.bot.store.outcome(&id).unwrap(),
             Outcome::AskedBack("and why".into())
         );
+    }
+
+    fn message_to(t: &T, session: &str) -> String {
+        t.bot
+            .store
+            .add_prompt(crate::store::NewPrompt {
+                session: session.into(),
+                source: "deck".into(),
+                text: "status?".into(),
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_waiting_message_goes_out_only_with_its_reply() {
+        let mut t = setup(LOG);
+        let me = crate::sessions::Session {
+            owner: "o-1".into(),
+            pid: std::process::id(),
+            client: "pi".into(),
+            ..Default::default()
+        };
+        crate::sessions::register(&t.bot.dir, &me).unwrap();
+        let id = message_to(&t, "o-1");
+        t.idle.set(Some(3600));
+        t.bot.turn().unwrap();
+        assert!(t.bot.api.sent.is_empty(), "nothing to do on it yet");
+
+        t.bot.store.reply(&id, "all good").unwrap();
+        t.bot.turn().unwrap();
+        t.bot.turn().unwrap();
+        let card = t.bot.api.sent[0].clone();
+        assert!(card.text.contains("status?"), "{}", card.text);
+        let thread: Vec<&Out> = t
+            .bot
+            .api
+            .sent
+            .iter()
+            .filter(|o| o.reply_to == Some(card.message_id))
+            .collect();
+        assert_eq!(thread.len(), 1, "the reply is under it, once");
+        assert_eq!(thread[0].text, "session: all good");
+    }
+
+    #[test]
+    fn a_card_got_here_and_replied_to_later_goes_out_again() {
+        let mut t = setup(LOG);
+        let id = message_to(&t, "gone");
+        t.idle.set(Some(3600));
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.api.sent.len(), 1, "no such session: the user sees it");
+        t.bot.store.seen(&id).unwrap();
+        t.bot.turn().unwrap();
+        assert!(st(&t).messages[&id].done);
+        t.bot.turn().unwrap();
+        assert_eq!(t.bot.api.sent.len(), 1, "filed and nothing new");
+
+        t.bot.store.reply(&id, "late, but done").unwrap();
+        t.bot.turn().unwrap();
+        t.bot.turn().unwrap();
+        assert!(!st(&t).messages[&id].done);
+        let texts: Vec<&str> = t.bot.api.sent.iter().map(|o| o.text.as_str()).collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert_eq!(texts[2], "session: late, but done");
+
+        t.bot.store.seen(&id).unwrap();
+        t.bot.turn().unwrap();
+        t.bot.store.reply(&id, "one more").unwrap();
+        t.bot.turn().unwrap();
+        t.bot.turn().unwrap();
+        let texts: Vec<&str> = t.bot.api.sent.iter().map(|o| o.text.as_str()).collect();
+        assert_eq!(texts.len(), 5, "only what is new follows: {texts:?}");
+        assert_eq!(texts[4], "session: one more");
+    }
+
+    #[test]
+    fn status_leaves_out_what_waits_on_a_session() {
+        let t = setup(LOG);
+        let me = crate::sessions::Session {
+            owner: "o-1".into(),
+            pid: std::process::id(),
+            client: "pi".into(),
+            ..Default::default()
+        };
+        crate::sessions::register(&t.bot.dir, &me).unwrap();
+        message_to(&t, "o-1");
+        let open = t.bot.store.list().0;
+        assert_eq!(open.len(), 1);
+        let text = summary(&st(&t), &open, None, 10);
+        assert!(text.contains("0 open"), "{text}");
+        assert!(!text.contains("not sent yet"), "{text}");
     }
 
     #[test]

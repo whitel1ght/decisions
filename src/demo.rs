@@ -63,6 +63,7 @@ fn card(
         source: "demo".into(),
         kind: String::new(),
         prompt: false,
+        waiting: false,
         question: question.into(),
         asked: iso(asked),
         blocks: blocks.into(),
@@ -362,7 +363,11 @@ impl Backend for Demo {
             .lock()
             .map_err(|_| "demo: state poisoned".to_string())?;
         self.settle(&mut s);
-        Ok(s.open.clone())
+        let mut list = s.open.clone();
+        for d in &mut list {
+            d.waiting = d.awaits_reply();
+        }
+        Ok(list)
     }
 
     fn tell(&self, id: &str, _text: &str) -> Result<Option<String>, String> {
@@ -476,6 +481,7 @@ impl Backend for Demo {
             source: source.into(),
             kind: "answer".into(),
             prompt: true,
+            waiting: true,
             question: text.into(),
             asked: chrono::Local::now().to_rfc3339(),
             blocks: String::new(),

@@ -141,8 +141,13 @@ check "a running session lists, a dead one goes" "the system · pi · dotfiles �
 PID=$("$BIN" prompt system 'how far along?')
 J=$("$BIN" list --json | jq -c ".[] | select(.id==\"$PID\") | [.kind,.prompt,.session,.followup]")
 check "a prompt is an answer card waiting on the session" '["answer",true,"o-1","how far along?"]' "$J"
+WAITING=$("$BIN" count --badge)
 "$BIN" reply "$PID" 'six of nine'
 check "the reply clears what waits" "" "$("$BIN" list --json | jq -r ".[] | select(.id==\"$PID\") | .followup")"
+[ "$("$BIN" count --badge)" != "$WAITING" ] && pass "only the reply puts a message on the badge" || fail "badge" "$WAITING both times"
+"$BIN" seen "$PID" >/dev/null
+"$BIN" reply "$PID" 'nine of nine'
+check "a reply on a filed message reopens it" 'session: nine of nine' "$("$BIN" list --json | jq -r ".[] | select(.id==\"$PID\") | .discussion[-1] | .who + \": \" + .text")"
 
 echo
 echo "passed: $PASS  failed: $FAIL"

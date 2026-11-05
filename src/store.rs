@@ -6,12 +6,14 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, Local, SecondsFormat};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::queue::{Decision, Entry, Opt};
+use crate::sessions;
 
 const FIELDS: [&str; 11] = [
     "id", "day", "key", "mr", "asked", "blocks", "status", "source", "kind", "origin", "session",
@@ -23,6 +25,8 @@ pub const PROMPT: &str = "prompt";
 const SECTIONS: [&str; 5] = ["Question", "Context", "Options", "Discussion", "Answer"];
 const REC: &str = " (recommended)";
 const RECENT_HOURS: i64 = 12;
+/// How long a card stays off the stack for a running session to reply.
+const REPLY_WITHIN: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fail(pub String);
@@ -603,6 +607,7 @@ impl Store {
             source: d.get("source").into(),
             kind: d.get("kind").into(),
             prompt: d.get("origin") == PROMPT,
+            waiting: false,
             question: one_line(d.section("Question")),
             asked: d.get("asked").into(),
             blocks: d.get("blocks").into(),
@@ -648,7 +653,32 @@ impl Store {
 
     pub fn list(&self) -> (Vec<Decision>, Vec<String>) {
         let (docs, skipped) = self.open_docs();
-        (docs.iter().map(|d| self.summary(d)).collect(), skipped)
+        let mut running = None;
+        let list = docs
+            .iter()
+            .map(|doc| {
+                let mut d = self.summary(doc);
+                d.waiting = d.awaits_reply()
+                    && self.written_lately(&d.id)
+                    && running
+                        .get_or_insert_with(|| sessions::running(&self.dir))
+                        .iter()
+                        .any(|s| s.owner == doc.get("session"));
+                d
+            })
+            .collect();
+        (list, skipped)
+    }
+
+    /// A session that is running but never replies must not hide the user's words for good.
+    fn written_lately(&self, id: &str) -> bool {
+        fs::metadata(self.dir.join(format!("{id}.md")))
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age < REPLY_WITHIN))
+    }
+
+    pub fn skipped(&self) -> Vec<String> {
+        self.open_docs().1
     }
 
     pub fn list_json(&self) -> Value {
@@ -702,7 +732,11 @@ impl Store {
     }
 
     pub fn count_answers(&self) -> usize {
-        self.open_docs().0.iter().filter(|d| d.is_answer()).count()
+        self.list()
+            .0
+            .iter()
+            .filter(|d| d.is_answer() && !d.waiting)
+            .count()
     }
 
     pub fn show(&self, id: &str) -> Result<String> {
@@ -886,6 +920,10 @@ impl Store {
             if !n.session.trim().is_empty() {
                 doc.set("session", one_line(&n.session));
             }
+            // This answers what the user last wrote, so the card must not go on waiting for it.
+            if !doc.followup().is_empty() {
+                doc.discuss("session", "answered above")?;
+            }
             write_atomic(&self.dir.join(format!("{id}.md")), &render(&doc))?;
             return Ok(id);
         }
@@ -1054,9 +1092,26 @@ impl Store {
 
     pub fn reply(&self, id: &str, text: &str) -> Result<()> {
         let _lock = self.lock()?;
-        let (p, mut doc) = self.load(id)?;
+        let Ok((p, mut doc)) = self.load(id) else {
+            return self.reply_on_filed(id, text);
+        };
         doc.discuss("session", text)?;
         write_atomic(&p, &render(&doc))
+    }
+
+    /// An answer card the user filed before its session got to reply comes back open, so the
+    /// reply reaches them. One write: no reader sees it open without the reply.
+    fn reply_on_filed(&self, id: &str, text: &str) -> Result<()> {
+        let filed = self.find_file(id)?;
+        let mut doc = parse(&fs::read_to_string(&filed).map_err(io)?)?;
+        if !doc.is_answer() || doc.get("status") != "seen" {
+            return fail(format!("{id} not found in {}", self.dir.display()));
+        }
+        doc.set("status", "open");
+        doc.sections.remove("Answer");
+        doc.discuss("session", text)?;
+        write_atomic(&self.dir.join(format!("{id}.md")), &render(&doc))?;
+        fs::remove_file(&filed).map_err(io)
     }
 
     pub fn withdraw(&self, id: &str, reason: &str) -> Result<()> {
@@ -1820,6 +1875,129 @@ mod tests {
         s.reply(&id, "six of nine").unwrap();
         assert_eq!(s.list_json()[0]["followup"], "");
         assert!(s.seen(&id).is_ok());
+    }
+
+    /// A running session that a card can wait on, without Claude Code's own list deciding.
+    fn run_session(s: &Store, owner: &str) {
+        let me = crate::sessions::Session {
+            owner: owner.into(),
+            pid: std::process::id(),
+            client: "pi".into(),
+            ..Default::default()
+        };
+        crate::sessions::register(&s.dir, &me).unwrap();
+    }
+
+    fn waiting(s: &Store) -> Vec<bool> {
+        s.list().0.iter().map(|d| d.waiting).collect()
+    }
+
+    #[test]
+    fn a_message_waits_only_while_its_session_runs_and_has_not_replied() {
+        let s = store();
+        let id = s.add_prompt(prompt("status?", "o-1")).unwrap();
+        assert_eq!(waiting(&s), [false], "no such session: the user sees it");
+        assert_eq!(s.count_answers(), 1);
+
+        run_session(&s, "o-1");
+        assert_eq!(waiting(&s), [true]);
+        assert_eq!(s.count_answers(), 0, "nothing on the badge");
+        assert_eq!(
+            s.list_json()[0]["followup"],
+            "status?",
+            "it still gets there"
+        );
+
+        s.reply(&id, "fine").unwrap();
+        assert_eq!(waiting(&s), [false]);
+        assert_eq!(s.count_answers(), 1);
+
+        s.ask(&id, "and now?").unwrap();
+        assert_eq!(waiting(&s), [true], "a follow-up waits the same way");
+    }
+
+    #[test]
+    fn a_session_that_never_replies_gives_the_card_back() {
+        let s = store();
+        let id = s.add_prompt(prompt("status?", "o-1")).unwrap();
+        run_session(&s, "o-1");
+        assert_eq!(waiting(&s), [true]);
+        let old = std::time::SystemTime::now() - REPLY_WITHIN - Duration::from_secs(1);
+        File::options()
+            .write(true)
+            .open(s.dir.join(format!("{id}.md")))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(waiting(&s), [false]);
+    }
+
+    #[test]
+    fn a_question_never_waits_off_the_stack() {
+        let s = store();
+        first(&s);
+        s.ask("D-1", "why?").unwrap();
+        run_session(&s, "");
+        assert_eq!(waiting(&s), [false]);
+    }
+
+    #[test]
+    fn a_reply_brings_a_filed_answer_card_back() {
+        let s = store();
+        let id = s.add_prompt(prompt("status?", "o-1")).unwrap();
+        let filed = s.seen(&id).unwrap();
+        assert!(s.list().0.is_empty());
+
+        s.reply(&id, "all good").unwrap();
+        assert!(!filed.exists(), "not in two places");
+        assert_eq!(s.outcome(&id).unwrap(), Outcome::Pending);
+        let d = &s.list().0[0];
+        assert_eq!(d.discussion.last().unwrap().text, "all good");
+        assert!(!s.show(&id).unwrap().contains("## Answer"), "seen no more");
+        s.seen(&id).unwrap();
+        assert_eq!(s.outcome(&id).unwrap(), Outcome::Seen);
+    }
+
+    #[test]
+    fn a_reply_does_not_reopen_a_closed_question() {
+        let s = store();
+        first(&s);
+        s.answer("D-1", 1, "").unwrap();
+        s.close("D-1").unwrap();
+        assert!(s.reply("D-1", "late").is_err());
+        assert!(s.list().0.is_empty());
+        assert!(s.reply("D-99", "nobody").is_err());
+    }
+
+    #[test]
+    fn a_blank_reply_leaves_a_filed_card_filed() {
+        let s = store();
+        let id = s.add_prompt(prompt("status?", "o-1")).unwrap();
+        let filed = s.seen(&id).unwrap();
+        assert!(s.reply(&id, "   ").is_err());
+        assert!(filed.exists());
+        assert!(
+            s.list_json().as_array().unwrap().is_empty(),
+            "not offered again"
+        );
+    }
+
+    #[test]
+    fn a_new_answer_on_the_same_card_ends_the_wait_for_a_reply() {
+        let s = store();
+        run_session(&s, "o-1");
+        let mut n = answer_card("x", "q", "first");
+        n.session = "o-1".into();
+        let id = s.add_answer(n).unwrap();
+        s.ask(&id, "and?").unwrap();
+        assert_eq!(waiting(&s), [true]);
+
+        let mut n = answer_card("x", "q", "second");
+        n.session = "o-1".into();
+        assert_eq!(s.add_answer(n).unwrap(), id);
+        assert_eq!(waiting(&s), [false]);
+        assert_eq!(s.list().0[0].context, "second");
+        assert_eq!(s.list_json()[0]["followup"], "", "nothing left to deliver");
     }
 
     #[test]

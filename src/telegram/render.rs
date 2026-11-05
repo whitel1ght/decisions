@@ -317,6 +317,7 @@ mod tests {
             source: "claude-code · acme-backend".into(),
             kind: String::new(),
             prompt: false,
+            waiting: false,
             question: "Push the fix & post?".into(),
             asked: "2026-10-21T11:00:00+03:00".into(),
             blocks: "reply".into(),

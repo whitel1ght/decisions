@@ -234,9 +234,9 @@ impl PromptLine {
 #[derive(Debug, Default)]
 pub struct State {
     pub prompt: PromptLine,
-    /// The waiting message card that one more ⏎ drops.
-    pub drop_armed: Option<String>,
     pub queue: Vec<Decision>,
+    /// Cards kept out of the queue until their session replies.
+    pub sent: usize,
     pub cur: usize,
     pub side: Side,
     pub cursor: Option<usize>,
@@ -371,8 +371,8 @@ fn answer_box(s: &mut State) {
         text,
     }) = &s.input
         && text.is_empty()
-        && s.is_answer_card(id)
         && s.current().map(|d| &d.id) != Some(id)
+        && !s.queue.iter().any(|d| &d.id == id && !d.is_answer())
     {
         s.input = None;
     }
@@ -445,7 +445,11 @@ fn loaded(s: &mut State, list: Vec<Decision>) {
         .map(|p| p.decision.id.clone())
         .chain(s.sending.keys().cloned())
         .collect();
-    let mut list: Vec<Decision> = list.into_iter().filter(|d| !held.contains(&d.id)).collect();
+    let (waiting, mut list): (Vec<Decision>, Vec<Decision>) = list
+        .into_iter()
+        .filter(|d| !held.contains(&d.id))
+        .partition(|d| d.waiting);
+    s.sent = waiting.len();
     s.skipped.retain(|id| list.iter().any(|d| &d.id == id));
     list.sort_by_key(|d| {
         if s.failed.contains_key(&d.id) || s.ask_failed.contains_key(&d.id) {
@@ -465,7 +469,7 @@ fn loaded(s: &mut State, list: Vec<Decision>) {
         }
         if let Some(gone) = cur_id.as_ref().filter(|c| !ids.contains(c)) {
             s.anims.push(Anim::Leave(gone.clone()));
-            if s.side == Side::Back {
+            if s.side == Side::Back && !waiting.iter().any(|d| &d.id == gone) {
                 s.toast(format!("{gone} was closed elsewhere"));
             }
             s.reset_view();
@@ -482,9 +486,6 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
     s.flip = None;
     if k == Key::Interrupt {
         return quit(s, out);
-    }
-    if k != Key::Enter {
-        s.drop_armed = None;
     }
     if s.prompt.open {
         return prompt_key(s, k, out);
@@ -669,13 +670,6 @@ fn enter(s: &mut State, out: &mut Vec<Command>) {
         return throw(s, n, note, custom, out);
     }
     if d.is_answer() {
-        // The session may not have read a message yet, and filing the card takes it away.
-        let unread = d.prompt && d.discussion.last().is_some_and(|e| e.who == "you");
-        if unread && s.drop_armed.as_ref() != Some(&d.id) {
-            s.drop_armed = Some(d.id.clone());
-            return s.toast("still waiting for the session · ⏎ again drops the message".into());
-        }
-        s.drop_armed = None;
         return throw(s, 0, None, None, out);
     }
     if s.cursor == Some(d.options.len()) {
@@ -1025,7 +1019,7 @@ fn prompt_sent(s: &mut State, result: Result<String, String>) {
                 .target_session()
                 .map_or("the session", |x| x.label())
                 .to_string();
-            s.toast(format!("✓ sent to {label} · reply on {id}"));
+            s.toast(format!("✓ sent to {label} · its reply comes as {id}"));
         }
         Err(e) => {
             if let Some((text, mut images)) = draft {
@@ -1174,10 +1168,12 @@ fn sent(
         match result {
             Ok(warning) => {
                 s.ask_failed.remove(&id);
-                let done = if s.is_answer_card(&id) {
-                    format!("follow-up on {id} sent to the session")
-                } else {
+                // A follow-up may have taken its card off the stack already.
+                let question = s.queue.iter().any(|d| d.id == id && !d.is_answer());
+                let done = if question {
                     format!("asked {id}")
+                } else {
+                    format!("follow-up sent · {id} comes back with the reply")
                 };
                 s.toast(warning.unwrap_or(done));
             }
@@ -1697,7 +1693,7 @@ mod tests {
         update(&mut s, sent("D-5", true, Ok(())), T0);
         assert_eq!(
             s.toast.as_ref().unwrap().0,
-            "follow-up on D-5 sent to the session"
+            "follow-up sent · D-5 comes back with the reply"
         );
         assert_eq!(ids(&s), ["D-5", "D-1"]);
         let mut after = answer_card("D-5");
@@ -2385,7 +2381,7 @@ mod tests {
     }
 
     #[test]
-    fn a_message_can_only_be_dropped_on_purpose_while_the_session_has_not_replied() {
+    fn a_card_waiting_on_its_session_stays_off_the_stack_until_the_reply() {
         let mut d = answer_card("D-5");
         d.prompt = true;
         d.discussion = vec![crate::queue::Entry {
@@ -2393,27 +2389,74 @@ mod tests {
             who: "you".into(),
             text: "status?".into(),
         }];
+        d.waiting = true;
         let mut s = loaded(vec![d.clone()]);
-        press(&mut s, Key::Enter);
-        assert_eq!(s.queue.len(), 1, "the first ⏎ only warns");
-        assert!(s.toast.as_ref().unwrap().0.contains("⏎ again drops"));
-        press(&mut s, Key::Enter);
         assert!(s.queue.is_empty());
+        assert_eq!(s.sent, 1);
 
-        let mut s = loaded(vec![d.clone()]);
-        press(&mut s, Key::Enter);
-        press(&mut s, Key::Down);
-        press(&mut s, Key::Enter);
-        assert_eq!(s.queue.len(), 1, "any other key starts over");
-
+        d.waiting = false;
         d.discussion.push(crate::queue::Entry {
             at: "10:01".into(),
             who: "session".into(),
             text: "fine".into(),
         });
+        update(&mut s, Event::Loaded(Ok(vec![d])), T0);
+        assert_eq!(s.sent, 0);
+        assert_eq!(s.current().unwrap().id, "D-5", "the reply brings it back");
+        press(&mut s, Key::Enter);
+        assert!(s.queue.is_empty(), "one ⏎ is got it");
+    }
+
+    #[test]
+    fn after_a_follow_up_the_next_words_go_to_the_next_card() {
+        let mut d = answer_card("D-5");
+        let mut s = loaded(vec![d.clone(), answer_card("D-6")]);
+        update(&mut s, Event::Tick, T0);
+        type_in(&mut s, "and the tests?");
+        press(&mut s, Key::Enter);
+        d.waiting = true;
+        update(
+            &mut s,
+            Event::Loaded(Ok(vec![d.clone(), answer_card("D-6")])),
+            T0,
+        );
+        assert_eq!(s.current().unwrap().id, "D-6");
+        let input = s.input.as_ref().expect("the next card's box is open");
+        assert_eq!(input.kind, InputKind::Ask { id: "D-6".into() });
+
+        let mut s = loaded(vec![answer_card("D-5")]);
+        update(&mut s, Event::Tick, T0);
+        type_in(&mut s, "and the tests?");
+        press(&mut s, Key::Enter);
+        update(&mut s, Event::Loaded(Ok(vec![d])), T0);
+        assert!(s.input.is_none(), "an empty deck takes its keys again");
+        press(&mut s, Key::Char('q'));
+        assert!(s.quitting);
+    }
+
+    #[test]
+    fn a_card_back_with_no_reply_is_filed_by_one_enter() {
+        let mut d = answer_card("D-5");
+        d.prompt = true;
+        d.discussion = vec![crate::queue::Entry {
+            at: "10:00".into(),
+            who: "you".into(),
+            text: "status?".into(),
+        }];
         let mut s = loaded(vec![d]);
         press(&mut s, Key::Enter);
-        assert!(s.queue.is_empty(), "after a reply it is an ordinary got it");
+        assert!(s.queue.is_empty(), "nothing asks twice");
+    }
+
+    #[test]
+    fn a_followed_up_card_leaving_the_stack_was_not_closed_elsewhere() {
+        let mut d = answer_card("D-5");
+        let mut s = loaded(vec![d.clone(), answer_card("D-6")]);
+        s.side = Side::Back;
+        d.waiting = true;
+        update(&mut s, Event::Loaded(Ok(vec![d, answer_card("D-6")])), T0);
+        assert_eq!(s.current().unwrap().id, "D-6");
+        assert!(s.toast.is_none(), "{:?}", s.toast);
     }
 
     #[test]

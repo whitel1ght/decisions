@@ -107,10 +107,16 @@ back); a text reply to the card in Telegram; or
 with `reply` on the same card; the thread shows under the answer. Neither closes it; marking it
 seen does.
 
+While that session runs and has not replied, there is nothing for you to do on the card, so it
+leaves the stack and the badge, the deck's header counts it (`⧗ 1 sent`), and it returns with the
+reply. It also returns, saying there is no reply yet, when the session exits or an hour has passed.
+A reply on a card you already marked seen brings the card back too.
+
 ## Messaging a running session
 
 `Tab` in the deck (or `decisions --prompt` to open with it) brings up a prompt line under the
-cards: pick a running session, type, `⏎`. The reply lands on a card of its own, so you never
+cards: pick a running session, type, `⏎`. No card sits in your way while the session works: the
+header counts the message (`⧗ 1 sent`) and the reply lands on a card of its own, so you never
 switch to the session or scroll through its output. `Esc` closes the line and keeps your draft
 while the deck stays open.
 

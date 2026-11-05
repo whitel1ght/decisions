@@ -221,8 +221,7 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
             }
         }
         Cmd::List { json } => {
-            let (_, skipped) = store.list();
-            for s in &skipped {
+            for s in &store.skipped() {
                 eprintln!("decisions: {s}");
             }
             if json {
