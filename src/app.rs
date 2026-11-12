@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::edit::{self, Edit};
 use crate::prompt::{self, Image};
 use crate::queue::Decision;
 use crate::sessions::{self, Session};
@@ -34,6 +35,8 @@ pub enum Key {
     CtrlU,
     CtrlV,
     Interrupt,
+    /// Cursor and line editing; only the text boxes use them. `^u` is `CtrlU`, which clears one.
+    Edit(Edit),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +159,8 @@ pub enum InputKind {
 pub struct Input {
     pub kind: InputKind,
     pub text: String,
+    /// How many characters follow the cursor.
+    pub back: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +203,8 @@ pub enum Pick {
 pub struct PromptLine {
     pub open: bool,
     pub text: String,
+    /// How many characters follow the cursor. The `@` and `#` lists work only at the end.
+    pub back: usize,
     pub images: Vec<Image>,
     /// The chosen session's owner id.
     pub target: Option<String>,
@@ -649,6 +656,7 @@ fn open_tell(s: &mut State) {
         s.input = Some(Input {
             kind: InputKind::Tell { id },
             text: String::new(),
+            back: 0,
         });
     }
 }
@@ -750,12 +758,14 @@ fn note(s: &mut State) {
         s.input = Some(Input {
             kind: InputKind::Note,
             text: String::new(),
+            back: 0,
         });
     } else if let Some(id) = s.current().map(|d| d.id.clone()) {
         let text = s.notes.get(&id).cloned().unwrap_or_default();
         s.input = Some(Input {
             kind: InputKind::CardNote { id },
             text,
+            back: 0,
         });
     }
 }
@@ -774,6 +784,7 @@ fn ask(s: &mut State, out: &mut Vec<Command>) {
         s.input = Some(Input {
             kind: InputKind::Ask { id },
             text,
+            back: 0,
         });
     }
 }
@@ -893,14 +904,18 @@ fn prompt_text_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         Key::CtrlV => out.push(Command::PasteImage),
         Key::Enter => send_prompt(s, out),
         Key::Backspace => {
-            if p.text.pop().is_none() {
+            if !edit::backspace(&mut p.text, &mut p.back) && p.text.is_empty() {
                 p.images.pop();
             }
         }
-        Key::Space => p.text.push(' '),
+        Key::CtrlU => edit::apply(&mut p.text, &mut p.back, Edit::Clear),
+        Key::Edit(e) => edit::apply(&mut p.text, &mut p.back, e),
+        Key::Space => edit::insert(&mut p.text, p.back, " "),
         // `#` picks the session only as the line's first character; later it is plain text.
         Key::Char('#') if p.text.is_empty() => open_session_pick(s),
-        Key::Char('@') if p.text.is_empty() || p.text.ends_with(char::is_whitespace) => {
+        Key::Char('@')
+            if p.back == 0 && (p.text.is_empty() || p.text.ends_with(char::is_whitespace)) =>
+        {
             p.text.push('@');
             // A new `@` reads its folder afresh.
             p.dir.clear();
@@ -910,7 +925,7 @@ fn prompt_text_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
                 sel: 0,
             };
         }
-        Key::Char(c) => p.text.push(c),
+        Key::Char(c) => edit::insert(&mut p.text, p.back, c.encode_utf8(&mut [0; 4])),
         _ => {}
     }
 }
@@ -1038,6 +1053,7 @@ fn send_prompt(s: &mut State, out: &mut Vec<Command>) {
         text: prompt::compose(&text, &images),
     });
     s.prompt.sending = Some((std::mem::take(&mut s.prompt.text), images));
+    s.prompt.back = 0;
     s.prompt.open = false;
     s.toast(format!("sending to {label}…"));
 }
@@ -1061,6 +1077,7 @@ fn prompt_sent(s: &mut State, result: Result<String, String>) {
                 // Anything typed since goes after the message that came back.
                 let p = &mut s.prompt;
                 p.text = format!("{text} {}", p.text).trim_end().to_string();
+                p.back = 0;
                 images.append(&mut p.images);
                 p.images = images;
                 p.pick = Pick::None;
@@ -1080,7 +1097,11 @@ fn paste(s: &mut State, text: String, out: &mut Vec<Command>) {
             return;
         }
         if s.prompt.pick == Pick::None {
-            s.prompt.text.push_str(&crate::store::one_line(&text));
+            edit::insert(
+                &mut s.prompt.text,
+                s.prompt.back,
+                &crate::store::one_line(&text),
+            );
             return;
         }
     }
@@ -1100,11 +1121,13 @@ fn input_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         return;
     };
     match k {
-        Key::Char(c) => input.text.push(c),
-        Key::Space => input.text.push(' '),
+        Key::Char(c) => edit::insert(&mut input.text, input.back, c.encode_utf8(&mut [0; 4])),
+        Key::Space => edit::insert(&mut input.text, input.back, " "),
         Key::Backspace => {
-            input.text.pop();
+            edit::backspace(&mut input.text, &mut input.back);
         }
+        Key::CtrlU => edit::apply(&mut input.text, &mut input.back, Edit::Clear),
+        Key::Edit(e) => edit::apply(&mut input.text, &mut input.back, e),
         Key::Esc => {
             let was_note = input.kind == InputKind::Note;
             s.input = None;
@@ -1114,7 +1137,7 @@ fn input_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
             }
         }
         Key::Enter => {
-            let Some(Input { kind, text }) = s.input.take() else {
+            let Some(Input { kind, text, .. }) = s.input.take() else {
                 return;
             };
             let text = text.trim().to_string();
@@ -2114,6 +2137,27 @@ mod tests {
     }
 
     #[test]
+    fn the_cursor_moves_in_a_card_input_and_ctrl_u_clears_it() {
+        let mut s = loaded(fixture());
+        press(&mut s, Key::Char('n'));
+        type_text(&mut s, "use stagng");
+        press(&mut s, Key::Edit(Edit::Left));
+        press(&mut s, Key::Edit(Edit::Left));
+        press(&mut s, Key::Char('i'));
+        assert_eq!(s.input.as_ref().unwrap().text, "use staging");
+        press(&mut s, Key::Edit(Edit::Home));
+        press(&mut s, Key::Edit(Edit::Delete));
+        press(&mut s, Key::Char('U'));
+        assert_eq!(s.input.as_ref().unwrap().text, "Use staging");
+        press(&mut s, Key::CtrlU);
+        assert_eq!(s.input.as_ref().unwrap().text, "");
+        assert_eq!(s.scroll, 0, "^u in a text box does not page the card");
+        type_text(&mut s, "prod");
+        press(&mut s, Key::Enter);
+        assert_eq!(s.notes["D-1"], "prod");
+    }
+
+    #[test]
     fn skipping_a_card_drops_its_note() {
         let mut s = loaded(many(2));
         press(&mut s, Key::Char('n'));
@@ -2196,6 +2240,36 @@ mod tests {
         assert!(press(&mut s, Key::Char('q')).is_empty());
         assert_eq!(s.prompt.text, "1q");
         assert!(s.pending.is_none() && !s.quitting);
+    }
+
+    #[test]
+    fn the_prompt_line_edits_at_the_cursor_and_ctrl_u_clears_the_text_only() {
+        let mut s = prompting();
+        type_in(&mut s, "check the logs");
+        press(&mut s, Key::Edit(Edit::WordLeft));
+        type_in(&mut s, "prod ");
+        assert_eq!(s.prompt.text, "check the prod logs");
+        press(&mut s, Key::Char('@'));
+        assert_eq!(s.prompt.pick, Pick::None, "@ mid-line is plain text");
+        assert_eq!(s.prompt.text, "check the prod @logs");
+        press(&mut s, Key::Backspace);
+        update(&mut s, Event::Paste("staging".into()), T0);
+        press(&mut s, Key::Space);
+        assert_eq!(s.prompt.text, "check the prod staging logs");
+        let image = Image {
+            path: "/a.png".into(),
+            bytes: 1,
+        };
+        update(&mut s, Event::ImagePasted(Ok(image)), T0);
+        press(&mut s, Key::CtrlU);
+        assert_eq!(s.prompt.text, "");
+        assert_eq!(
+            s.prompt.images.len(),
+            1,
+            "images stay; backspace drops them"
+        );
+        press(&mut s, Key::Backspace);
+        assert!(s.prompt.images.is_empty());
     }
 
     #[test]

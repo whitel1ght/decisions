@@ -11,6 +11,7 @@ use ratatui::widgets::{
 };
 
 use crate::app::{FLIP_MS, InputKind, Pick, PromptLine, Side, State, UNDO_MS, age_label, band};
+use crate::edit;
 use crate::markdown;
 use crate::queue::Decision;
 use crate::stats::{self, Stats};
@@ -57,6 +58,10 @@ const KEYS: &[(&str, &str)] = &[
     ("o", "open the link (MR, PR, ticket)"),
     ("r", "reload"),
     ("S", "stats: the last 14 days"),
+    (
+        "in a text box",
+        "←/→ cursor · ⌥←/→ word · ^a/^e ends · ^w word · ^u clear",
+    ),
     ("q / esc", "send pending answers and close"),
 ];
 
@@ -333,22 +338,56 @@ fn input_label(kind: &InputKind) -> String {
     }
 }
 
-/// The open input's text and cursor, and how many rows it wraps to inside a box `width` wide.
-fn input_text(s: &State, width: u16) -> Option<(Paragraph<'static>, u16)> {
+/// `text` with its cursor `back` characters before the end: a bar after the last character,
+/// else the character under it inverted. The second list stops at the end of the word the
+/// cursor is in, so its wrapped rows count the rows down to the cursor.
+fn with_cursor(text: &str, back: usize) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    let style = Style::new().fg(theme::TEXT);
+    let (before, after) = text.split_at(edit::at(text, back));
+    let Some(c) = after.chars().next() else {
+        let all = vec![
+            Span::styled(before.to_string(), style),
+            Span::styled("▏", Style::new().fg(theme::LAVENDER)),
+        ];
+        return (all.clone(), all);
+    };
+    let rest = &after[c.len_utf8()..];
+    let word = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let under = Span::styled(
+        c.to_string(),
+        Style::new().fg(theme::BG).bg(theme::LAVENDER),
+    );
+    let before = Span::styled(before.to_string(), style);
+    (
+        vec![
+            before.clone(),
+            under.clone(),
+            Span::styled(rest.to_string(), style),
+        ],
+        vec![before, under, Span::styled(rest[..word].to_string(), style)],
+    )
+}
+
+/// The open input's text and cursor, how many rows it wraps to inside a box `width` wide, and
+/// how many of them reach down to the cursor.
+fn input_text(s: &State, width: u16) -> Option<(Paragraph<'static>, u16, u16)> {
     let i = s.input.as_ref()?;
-    let text = Paragraph::new(Line::from(vec![
-        Span::styled(i.text.clone(), Style::new().fg(theme::TEXT)),
-        Span::styled("▏", Style::new().fg(theme::LAVENDER)),
-    ]))
-    .wrap(Wrap { trim: false });
+    let (all, head) = with_cursor(&i.text, i.back);
+    let count = |spans| {
+        Paragraph::new(Line::from(spans))
+            .wrap(Wrap { trim: false })
+            .line_count(width.saturating_sub(4)) as u16
+    };
+    let to_cursor = count(head);
+    let text = Paragraph::new(Line::from(all)).wrap(Wrap { trim: false });
     let rows = text.line_count(width.saturating_sub(4)) as u16;
-    Some((text, rows))
+    Some((text, rows, to_cursor))
 }
 
 /// Splits `area` into the content and, at its bottom, the open input's box: as tall as the
 /// wrapped text, at least 3 rows, at most about half of `area`.
 fn split_input(s: &State, area: Rect) -> (Rect, Rect) {
-    let h = input_text(s, area.width).map_or(0, |(_, rows)| {
+    let h = input_text(s, area.width).map_or(0, |(_, rows, _)| {
         (rows + 2)
             .clamp(3, (area.height / 2).max(3))
             .min(area.height)
@@ -366,9 +405,9 @@ fn split_input(s: &State, area: Rect) -> (Rect, Rect) {
     )
 }
 
-/// Draws the open input in `rect`, scrolled so the end of the text, where the cursor is, shows.
+/// Draws the open input in `rect`, scrolled so the cursor shows.
 fn input_box(f: &mut Frame, s: &State, rect: Rect) {
-    let (Some(i), Some((text, rows))) = (&s.input, input_text(s, rect.width)) else {
+    let (Some(i), Some((text, _, to_cursor))) = (&s.input, input_text(s, rect.width)) else {
         return;
     };
     if rect.height == 0 {
@@ -385,13 +424,14 @@ fn input_box(f: &mut Frame, s: &State, rect: Rect) {
         ))
         .padding(Padding::horizontal(1))
         .style(Style::new().bg(theme::BG));
-    let top = rows.saturating_sub(rect.height.saturating_sub(2));
+    let top = to_cursor.saturating_sub(rect.height.saturating_sub(2));
     f.render_widget(Clear, rect);
     f.render_widget(text.scroll((top, 0)).block(block), rect);
 }
 
-/// The prompt line's content: the target session, the text, then any images.
-fn prompt_text(s: &State) -> Paragraph<'static> {
+/// The prompt line's content: the target session, the text, then any images. With `to_cursor`,
+/// only as far as the cursor's word, for counting the rows down to it.
+fn prompt_text(s: &State, to_cursor: bool) -> Paragraph<'static> {
     let p = &s.prompt;
     let chip = match p.target_session() {
         Some(x) => Span::styled(
@@ -404,19 +444,19 @@ fn prompt_text(s: &State) -> Paragraph<'static> {
         None if p.target.is_some() => Span::styled(" session gone ", Style::new().fg(theme::RED)),
         None => Span::styled(" no session ", Style::new().fg(theme::MUTED)),
     };
-    let typed = match &p.pick {
-        Pick::Sessions { query, .. } => {
-            Span::styled(format!("#{query}"), Style::new().fg(theme::BLUE))
+    let mut first = vec![chip, Span::raw(" ")];
+    match &p.pick {
+        Pick::Sessions { query, .. } => first.extend([
+            Span::styled(format!("#{query}"), Style::new().fg(theme::BLUE)),
+            Span::styled("▏", Style::new().fg(theme::LAVENDER)),
+        ]),
+        _ => {
+            let (all, head) = with_cursor(&p.text, p.back);
+            first.extend(if to_cursor { head } else { all });
         }
-        _ => Span::styled(p.text.clone(), Style::new().fg(theme::TEXT)),
-    };
-    let mut lines = vec![Line::from(vec![
-        chip,
-        Span::raw(" "),
-        typed,
-        Span::styled("▏", Style::new().fg(theme::LAVENDER)),
-    ])];
-    if !p.images.is_empty() {
+    }
+    let mut lines = vec![Line::from(first)];
+    if !p.images.is_empty() && !to_cursor {
         let chips: Vec<String> = p
             .images
             .iter()
@@ -444,7 +484,7 @@ fn split_prompt(s: &State, area: Rect) -> (Rect, Rect) {
     if !s.prompt.open {
         return (area, Rect { height: 0, ..area });
     }
-    let rows = prompt_text(s).line_count(area.width.saturating_sub(4)) as u16;
+    let rows = prompt_text(s, false).line_count(area.width.saturating_sub(4)) as u16;
     let h = (rows + 2)
         .clamp(3, (area.height / 2).max(3))
         .min(area.height);
@@ -465,8 +505,13 @@ fn prompt_bar(f: &mut Frame, s: &State, rect: Rect) {
     if rect.height == 0 {
         return;
     }
-    let text = prompt_text(s);
-    let rows = text.line_count(rect.width.saturating_sub(4)) as u16;
+    let text = prompt_text(s, false);
+    // At the end the image row shows too; with the cursor further back, its own row does.
+    let rows = if s.prompt.back == 0 {
+        text.line_count(rect.width.saturating_sub(4))
+    } else {
+        prompt_text(s, true).line_count(rect.width.saturating_sub(4))
+    } as u16;
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme::LAVENDER))
@@ -1317,6 +1362,21 @@ mod tests {
     }
 
     #[test]
+    fn a_cursor_moved_back_inverts_the_character_under_it_instead_of_the_bar() {
+        let mut s = state(fixture(), T0);
+        for k in [Key::Char('a'), Key::Char('x'), Key::Char('y')] {
+            app::update(&mut s, Event::Key(k), T0);
+        }
+        app::update(&mut s, Event::Key(Key::Edit(crate::edit::Edit::Left)), T0);
+        let (buf, d) = render(&s, 80, 24);
+        let (x, y) = input_box_in(&buf, d.areas.card, "ask D-1");
+        assert_eq!(find(&buf, "xy"), (x + 2, y + 1));
+        let under = &buf[(x + 3, y + 1)];
+        assert_eq!((under.symbol(), under.bg), ("y", theme::LAVENDER));
+        assert!(!screen(&buf).contains("xy▏"));
+    }
+
+    #[test]
     fn a_long_input_wraps_and_the_box_grows() {
         let mut s = state(fixture(), T0);
         app::update(&mut s, Event::Key(Key::Char('a')), T0);
@@ -1379,6 +1439,7 @@ mod tests {
         s.input = Some(app::Input {
             kind: InputKind::Note,
             text: "more".into(),
+            back: 0,
         });
         let (buf, d) = render(&s, 80, 24);
         let (_, y) = input_box_in(&buf, d.areas.card, "note");

@@ -166,6 +166,11 @@ message when the turn ends.
 | `?` | all the keys |
 | `q / esc` | send pending answers and close |
 
+In a text box (a note, an ask-back, your own answer, the prompt line) the keys edit the line as
+in a shell: `←` / `→` move the cursor, `⌥←` / `⌥→` (or `⌥b` / `⌥f`) a word, `Home` / `End` or
+`^a` / `^e` to the ends, `Delete` the character under the cursor, `^w` or `⌥⌫` the word before it,
+and `^u` clears the whole text. The `@` file list opens only at the end of the line.
+
 A card's border has its session's colour, so you can tell at a glance who is asking: the one set
 with `/color` in Claude Code, or else one the deck assigns the session and keeps, avoiding colours
 other open cards use. A card with no session has a quiet grey-blue border. The ⏱ timer turns blue →

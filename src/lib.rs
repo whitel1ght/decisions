@@ -3,6 +3,7 @@ pub mod cli;
 pub mod colors;
 pub mod config;
 pub mod demo;
+pub mod edit;
 pub mod fx;
 pub mod hook;
 pub mod idle;
