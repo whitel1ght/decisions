@@ -70,10 +70,20 @@ fn file(dir: &Path, pid: u32) -> PathBuf {
     folder(dir).join(format!("{pid}.json"))
 }
 
+/// Serialises writers of the registry: `register`, `unregister` and `set_state` each read and
+/// write a file under it. Released when the handle drops.
+fn lock(folder: &Path) -> std::io::Result<std::fs::File> {
+    let f = std::fs::File::create(folder.join(".lock"))?;
+    f.lock()?;
+    Ok(f)
+}
+
 /// Registers `session`; returns the file to `unregister` when it ends.
 pub fn register(dir: &Path, session: &Session) -> Result<PathBuf, String> {
     let path = file(dir, session.pid);
     std::fs::create_dir_all(folder(dir)).map_err(|e| e.to_string())?;
+    // Without the lock the server still registers: it only guards against a racing `set_state`.
+    let _lock = lock(&folder(dir));
     let text = serde_json::to_string_pretty(session).map_err(|e| e.to_string())?;
     write_atomic(&path, &text).map_err(|e| e.0)?;
     Ok(path)
@@ -87,11 +97,11 @@ pub fn set_state(dir: &Path, pid: u32, state: &str, now: i64) -> Result<(), Stri
     }
     let path = file(dir, pid);
     let none = || format!("no session registered for pid {pid}");
-    if !path.exists() {
-        return Err(none());
-    }
-    let lock = std::fs::File::create(folder(dir).join(".lock")).map_err(|e| e.to_string())?;
-    lock.lock().map_err(|e| e.to_string())?;
+    let _lock = match lock(&folder(dir)) {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(none()),
+        Err(e) => return Err(e.to_string()),
+    };
     let mut session = std::fs::read_to_string(&path)
         .ok()
         .and_then(|t| serde_json::from_str::<Session>(&t).ok())
@@ -107,6 +117,7 @@ pub fn set_state(dir: &Path, pid: u32, state: &str, now: i64) -> Result<(), Stri
 /// Removes `path` unless a newer server has written over it since: a restarted server can
 /// register before the old one exits.
 pub fn unregister(path: &Path, server: u32) {
+    let _lock = path.parent().and_then(|f| lock(f).ok());
     let mine = std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str::<Session>(&t).ok())
@@ -411,6 +422,31 @@ mod tests {
         let path = file(&d, me.pid);
         unregister(&path, 77);
         assert!(!path.exists(), "unregister still recognises its server");
+    }
+
+    #[test]
+    fn set_state_follows_the_registry_it_is_serialised_with() {
+        let d = dir("set-state-race");
+        let mut a = session("o", std::process::id(), "pi", "/x");
+        a.server = 1;
+        let path = register(&d, &a).unwrap();
+        unregister(&path, 1);
+        assert_eq!(
+            set_state(&d, a.pid, "idle", 1),
+            Err(format!("no session registered for pid {}", a.pid))
+        );
+        assert!(!path.exists(), "a removed session is not written back");
+        register(&d, &a).unwrap();
+        let mut b = a.clone();
+        b.server = 2;
+        register(&d, &b).unwrap();
+        set_state(&d, b.pid, "working", 5).unwrap();
+        let got = registered(&d);
+        assert_eq!((got[0].server, got[0].state.as_str()), (2, "working"));
+        assert_eq!(
+            set_state(&dir("set-state-none"), 1, "idle", 1),
+            Err("no session registered for pid 1".into())
+        );
     }
 
     #[test]
