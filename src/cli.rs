@@ -49,6 +49,8 @@ pub enum Cmd {
         options: Vec<String>,
         #[arg(long)]
         recommend: Option<usize>,
+        #[arg(long, default_value = "")]
+        session: String,
     },
     /// File an answer to the user's question as a card (the answer on stdin); prints its id
     Note {
@@ -173,6 +175,7 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
             question,
             options,
             recommend,
+            session,
         } => {
             let mut context = String::new();
             if !std::io::stdin().is_terminal() {
@@ -187,6 +190,7 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
                 options,
                 recommend,
                 context,
+                session,
             }) {
                 Ok(id) => {
                     println!("{id}");

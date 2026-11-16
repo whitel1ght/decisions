@@ -279,6 +279,7 @@ impl<W: Write> Server<W> {
             options,
             recommend: a["recommended"].as_u64().map(|n| n as usize),
             context,
+            session: self.owner.clone(),
         };
         if let Some(id) = self.store.find_asked(&new) {
             return Ok(id);

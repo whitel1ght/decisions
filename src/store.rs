@@ -431,6 +431,8 @@ pub struct New {
     pub options: Vec<String>,
     pub recommend: Option<usize>,
     pub context: String,
+    /// The asking session's id, so the activity screen can show it waiting; may be empty.
+    pub session: String,
 }
 
 /// An answer to a question the user asked a session, filed so they find it in the deck.
@@ -873,6 +875,7 @@ impl Store {
         doc.set("blocks", one_line(&n.blocks));
         doc.set("status", "open");
         doc.set("source", one_line(&n.source));
+        doc.set("session", one_line(&n.session));
         doc.set_section("Question", question);
         doc.set_section("Context", context);
         let lines: Vec<String> = opts
@@ -1799,6 +1802,23 @@ mod tests {
             (&json[0]["discussion_count"], &json[0]["followup"]),
             (&json!(4), &json!("B\n\nC"))
         );
+    }
+
+    #[test]
+    fn add_with_a_session_stamps_it() {
+        let s = store();
+        let mut n = new("", "Ship?", &["yes", "no"]);
+        n.session = "abc".into();
+        let id = s.add(n).unwrap();
+        assert!(s.show(&id).unwrap().contains("session: abc"));
+        assert_eq!(s.list_json()[0]["session"], "abc");
+    }
+
+    #[test]
+    fn add_without_one_writes_no_session_line() {
+        let s = store();
+        let id = s.add(new("", "Ship?", &["yes", "no"])).unwrap();
+        assert!(!s.show(&id).unwrap().contains("session:"));
     }
 
     #[test]

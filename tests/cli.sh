@@ -148,6 +148,9 @@ check "the reply clears what waits" "" "$("$BIN" list --json | jq -r ".[] | sele
 "$BIN" seen "$PID" >/dev/null
 "$BIN" reply "$PID" 'nine of nine'
 check "a reply on a filed message reopens it" 'session: nine of nine' "$("$BIN" list --json | jq -r ".[] | select(.id==\"$PID\") | .discussion[-1] | .who + \": \" + .text")"
+SID="$(run add --key '' --session s1 --question 'Which session?' --option a --option b </dev/null)"
+check "a question card names the session that asked" "s1" "$(run list --json | jq -r ".[] | select(.id==\"$SID\") | .session")"
+check "a card filed without one has no session" "" "$(run list --json | jq -r '.[] | select(.id=="D-2") | .session // ""')"
 
 echo
 echo "passed: $PASS  failed: $FAIL"
