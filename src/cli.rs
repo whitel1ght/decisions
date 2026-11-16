@@ -129,6 +129,13 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Tell the deck a harness is working or idle (exit 1 if no session is registered for the pid)
+    SessionState {
+        #[arg(long)]
+        pid: u32,
+        /// working or idle
+        state: String,
+    },
     /// Send a running session a message (its name, directory or id); prints the card its reply lands on
     Prompt {
         session: String,
@@ -358,6 +365,15 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
                 }
             }
             ExitCode::SUCCESS
+        }
+        Cmd::SessionState { pid, state } => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            match sessions::set_state(&cfg.dir, pid, &state, now) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => refused(e),
+            }
         }
         Cmd::Prompt { session, text } => {
             let list = sessions::running(&cfg.dir);

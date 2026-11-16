@@ -145,10 +145,17 @@ check "no sessions json" "[]" "$("$BIN" sessions --json)"
 "$BIN" prompt nobody hello >/dev/null 2>&1
 check "prompt to nobody is refused" "1" "$?"
 mkdir -p "$D/sessions"
-printf '{"owner":"o-1","pid":%s,"client":"pi","cwd":"/x/dotfiles","name":"the system"}' "$$" >"$D/sessions/o-1.json"
+printf '{"owner":"o-1","pid":%s,"client":"pi","cwd":"/x/dotfiles","name":"the system"}' "$$" >"$D/sessions/$$.json"
 printf '{"owner":"o-2","pid":4000000,"client":"pi","cwd":"/x/gone"}' >"$D/sessions/o-2.json"
 check "a running session lists, a dead one goes" "the system · pi · dotfiles · - · o-1" "$("$BIN" sessions)"
 [ ! -e "$D/sessions/o-2.json" ] && pass "a dead session's file is removed" || fail "dead session file" "still there"
+"$BIN" session-state --pid "$$" working
+check "session-state working is accepted" "0" "$?"
+check "a pi session reports working" "the system · pi · dotfiles · working · o-1" "$("$BIN" sessions)"
+"$BIN" session-state --pid "$$" sleeping 2>/dev/null
+check "an unknown state is refused" "1" "$?"
+"$BIN" session-state --pid 4000001 idle 2>/dev/null
+check "an unregistered pid is refused" "1" "$?"
 PID=$("$BIN" prompt system 'how far along?')
 J=$("$BIN" list --json | jq -c ".[] | select(.id==\"$PID\") | [.kind,.prompt,.session,.followup]")
 check "a prompt is an answer card waiting on the session" '["answer",true,"o-1","how far along?"]' "$J"

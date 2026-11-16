@@ -79,6 +79,31 @@ pub fn register(dir: &Path, session: &Session) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Records that the harness `pid` is `working` or `idle`. `since` moves only when the state does,
+/// so a harness that repeats itself keeps its first time.
+pub fn set_state(dir: &Path, pid: u32, state: &str, now: i64) -> Result<(), String> {
+    if !matches!(state, "working" | "idle") {
+        return Err("state must be working or idle".into());
+    }
+    let path = file(dir, pid);
+    let none = || format!("no session registered for pid {pid}");
+    if !path.exists() {
+        return Err(none());
+    }
+    let lock = std::fs::File::create(folder(dir).join(".lock")).map_err(|e| e.to_string())?;
+    lock.lock().map_err(|e| e.to_string())?;
+    let mut session = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Session>(&t).ok())
+        .ok_or_else(none)?;
+    if session.state != state {
+        session.state = state.into();
+        session.since = now;
+    }
+    let text = serde_json::to_string_pretty(&session).map_err(|e| e.to_string())?;
+    write_atomic(&path, &text).map_err(|e| e.0)
+}
+
 /// Removes `path` unless a newer server has written over it since: a restarted server can
 /// register before the old one exits.
 pub fn unregister(path: &Path, server: u32) {
@@ -361,6 +386,64 @@ mod tests {
         let path = register(&d, &session("gone", 4_000_000, "pi", "/x")).unwrap();
         assert!(registered(&d).is_empty());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn set_state_rewrites_only_state_and_since() {
+        let d = dir("set-state");
+        let mut me = session("o", std::process::id(), "pi", "/x/dotfiles");
+        me.server = 77;
+        me.name = "the system".into();
+        register(&d, &me).unwrap();
+        set_state(&d, me.pid, "working", 1000).unwrap();
+        let want = Session {
+            state: "working".into(),
+            since: 1000,
+            ..me.clone()
+        };
+        assert_eq!(registered(&d), vec![want.clone()]);
+        set_state(&d, me.pid, "working", 5000).unwrap();
+        assert_eq!(registered(&d), vec![want], "the same state keeps its since");
+        set_state(&d, me.pid, "idle", 9000).unwrap();
+        let got = registered(&d);
+        assert_eq!((got[0].state.as_str(), got[0].since), ("idle", 9000));
+        assert_eq!(got[0].server, 77);
+        let path = file(&d, me.pid);
+        unregister(&path, 77);
+        assert!(!path.exists(), "unregister still recognises its server");
+    }
+
+    #[test]
+    fn set_state_refuses_unknown_pid_and_state() {
+        let d = dir("set-state-refuse");
+        let me = session("o", std::process::id(), "pi", "/x");
+        register(&d, &me).unwrap();
+        assert_eq!(
+            set_state(&d, me.pid, "sleeping", 1),
+            Err("state must be working or idle".into())
+        );
+        assert_eq!(
+            set_state(&d, 4_000_001, "idle", 1),
+            Err("no session registered for pid 4000001".into())
+        );
+        assert_eq!(registered(&d), vec![me]);
+    }
+
+    #[test]
+    fn merge_keeps_a_pi_sessions_state() {
+        let mut pi = session("p", 12, "pi", "/x/backend");
+        pi.state = "working".into();
+        pi.since = 4200;
+        let agents = [Agent {
+            pid: 10,
+            ..Agent::default()
+        }];
+        for got in [
+            merge(vec![pi.clone()], Some(&agents)),
+            merge(vec![pi.clone()], None),
+        ] {
+            assert_eq!((got[0].state.as_str(), got[0].since), ("working", 4200));
+        }
     }
 
     #[test]
