@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
+use crate::queue::Backend;
 use crate::store::{Event, New, NewAnswer, NewPrompt, Outcome};
 use crate::{hook, mcp, sessions, setup, stats, tui};
 
@@ -148,6 +149,16 @@ fn refused(e: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(1)
 }
 
+/// How many agent sessions are working now; `DECISIONS_ACTIVITY=0` skips the scan.
+fn working_agents(cfg: &Config) -> usize {
+    if std::env::var("DECISIONS_ACTIVITY").is_ok_and(|v| v == "0") {
+        return 0;
+    }
+    crate::live::Live::new(cfg)
+        .activity(false)
+        .map_or(0, |a| a.working())
+}
+
 fn told(cfg: &Config, r: crate::store::Result<Event>) -> ExitCode {
     match r {
         Ok(event) => {
@@ -277,6 +288,12 @@ pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
                 (true, 0, a) => Some(format!("{} {a}", cfg.icons.answer)),
                 (true, n, 0) => Some(format!("{} {n}", cfg.badge)),
                 (true, n, a) => Some(format!("{} {n} {} {a}", cfg.badge, cfg.icons.answer)),
+            };
+            let working = if badge { working_agents(cfg) } else { 0 };
+            let line = match (working, line) {
+                (0, line) => line,
+                (w, None) => Some(format!("{} {w}", cfg.icons.working)),
+                (w, Some(rest)) => Some(format!("{} {w} {rest}", cfg.icons.working)),
             };
             if let Some(line) = line {
                 println!("{line}");

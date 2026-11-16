@@ -2,12 +2,15 @@
 """Run the decisions binary in a pseudo-terminal (100x30), type steps, wait for it to exit.
 
 usage: drive.py BIN STEP...   (DRIVE_ARGS: space-separated arguments for BIN)
-A STEP is text to type (one key every 0.15 s), `sleep:SECONDS`, or `signal:NAME` (TERM, HUP).
+A STEP is text to type (one key every 0.15 s), `sleep:SECONDS`, `signal:NAME` (TERM, HUP),
+`seen:TEXT` or `gone:TEXT` (after 0.5 s, is TEXT in the output since the last such check, escape
+codes stripped; prints `ok seen:TEXT` / `FAIL seen:TEXT`, and the same for gone).
 Prints the exit code, or `timeout` (and exits 1) when the app is still running 15 s later.
 """
 import fcntl
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -16,15 +19,25 @@ import termios
 import time
 
 
+OUT = bytearray()
+
+
 def drain(fd, secs):
     end = time.time() + secs
     while (left := end - time.time()) > 0:
         ready, _, _ = select.select([fd], [], [], left)
         if ready:
             try:
-                os.read(fd, 65536)
+                OUT.extend(os.read(fd, 65536))
             except OSError:
                 return
+
+
+def check(fd, kind, text):
+    drain(fd, 0.5)
+    shown = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", OUT.decode(errors="replace"))
+    OUT.clear()
+    print(("ok " if (text in shown) == (kind == "seen") else "FAIL ") + kind + ":" + text)
 
 
 def main():
@@ -37,6 +50,8 @@ def main():
     for step in steps:
         if step.startswith("sleep:"):
             drain(fd, float(step[6:]))
+        elif step.startswith(("seen:", "gone:")):
+            check(fd, step[:4], step[5:])
         elif step.startswith("signal:"):
             os.kill(pid, getattr(signal, "SIG" + step[7:]))
             drain(fd, 0.3)

@@ -14,6 +14,10 @@ has() { case "$2" in *"$3"*) pass "$1" ;; *) fail "$1" "[$3] not in: $2" ;; esac
 
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
+mkdir -p "$SANDBOX/bin" "$SANDBOX/claude" "$SANDBOX/pi-sub"
+printf '#!/bin/sh\necho "[]"\n' > "$SANDBOX/bin/claude"
+chmod +x "$SANDBOX/bin/claude"
+export PATH="$SANDBOX/bin:$PATH" CLAUDE_CONFIG_DIR="$SANDBOX/claude" PI_SUB_DIR="$SANDBOX/pi-sub"
 export HOME="$SANDBOX/home" DECISIONS_DIR="$SANDBOX/store" DECISIONS_MR_STRIP=acme-
 export DECISIONS_ON_ANSWER="cat >> '$SANDBOX/events'"
 D="$DECISIONS_DIR"
@@ -108,6 +112,13 @@ run seen "$aid" >/dev/null; check "seen exits 0" "0" "$?"
 check "wait on a seen one" "seen: the user has read $aid" "$("$BIN" wait "$aid")"
 run seen D-2 >/dev/null; check "a question cannot be seen" "1" "$?"
 check "no answers, no envelope" "✋ $before" "$(run count --badge)"
+
+echo "working badge"
+mkdir -p "$PI_SUB_DIR/a1"; echo '{"label":"x"}' > "$PI_SUB_DIR/a1/meta.json"
+check "a working agent leads the badge" "⟳ 1 ✋ $before" "$(run count --badge)"
+check "DECISIONS_ACTIVITY=0 turns it off" "✋ $before" "$(DECISIONS_ACTIVITY=0 run count --badge)"
+check "plain count ignores it" "$before" "$(run count)"
+rm -r "$PI_SUB_DIR/a1"
 check "nerd, no answers" "$hand $before" "$(DECISIONS_ICONS=nerd run count --badge)"
 
 echo "setup"

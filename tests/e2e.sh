@@ -18,6 +18,10 @@ assert_contains() { case "$1" in *"$2"*) pass "$3" ;; *) fail "$3" "[$2] not in 
 
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
+mkdir -p "$SANDBOX/bin" "$SANDBOX/claude" "$SANDBOX/pi-sub"
+printf '#!/bin/sh\necho "[]"\n' > "$SANDBOX/bin/claude"
+chmod +x "$SANDBOX/bin/claude"
+export PATH="$SANDBOX/bin:$PATH" CLAUDE_CONFIG_DIR="$SANDBOX/claude" PI_SUB_DIR="$SANDBOX/pi-sub"
 
 # A fresh store with two open decisions: D-1 (Yes ★ / No) and D-2; "empty" leaves it empty.
 fresh() {
@@ -84,6 +88,12 @@ rc=$(DRIVE_ARGS=--demo drive 1 sleep:6 2 q)
 assert_eq 0 "$rc" "--demo runs without decide and quits cleanly"
 assert_eq "" "$(inbox)" "--demo answers never reach the inbox"
 assert_eq 2 "$("$BIN" count)" "--demo leaves the real queue alone"
+
+fresh activity
+out=$(DRIVE_ARGS=--demo drive w seen:"activity ·" $'\e' gone:"activity ·" q)
+assert_contains "$out" "ok seen:activity ·" "w opens the activity screen"
+assert_contains "$out" "ok gone:activity ·" "Esc returns to the deck"
+assert_eq 0 "$(printf '%s\n' "$out" | tail -1)" "the activity screen quits cleanly"
 
 export DECISIONS_DIR="$SANDBOX/nodir" DECISIONS_ON_ANSWER="cat >> '$SANDBOX/nodir.events'"
 ( sleep 1; "$BIN" add --key ACME-9 --question "First ever?" --option Yes --option No </dev/null >/dev/null ) &
