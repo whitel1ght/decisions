@@ -579,7 +579,7 @@ fn activity_enter(s: &mut State, out: &mut Vec<Command>) {
         return;
     };
     let (status, card) = (row.status, row.card.clone());
-    let (owner, label) = (row.session.owner.clone(), row.session.label().to_string());
+    let owner = row.session.owner.clone();
     if status == Status::Waiting {
         let Some(id) = card else {
             return s.toast("answer it in the session".into());
@@ -591,7 +591,16 @@ fn activity_enter(s: &mut State, out: &mut Vec<Command>) {
         return go(s, idx);
     }
     let draft = !s.prompt.text.is_empty() || !s.prompt.images.is_empty();
-    if draft && s.prompt.target.as_ref().is_some_and(|t| *t != owner) {
+    if draft && let Some(target) = s.prompt.target.clone().filter(|t| *t != owner) {
+        let label = s
+            .activity
+            .sessions
+            .iter()
+            .map(|r| &r.session)
+            .chain(&s.prompt.sessions)
+            .find(|x| x.owner == target)
+            .map_or(target.as_str(), Session::label)
+            .to_string();
         return s.toast(format!("draft is for {label}: send or clear it first"));
     }
     s.prompt.target = Some(owner);
@@ -1719,18 +1728,24 @@ mod tests {
     fn enter_keeps_a_draft_aimed_elsewhere() {
         let mut s = watching();
         s.prompt.text = "half a thought".into();
-        s.prompt.target = Some("o4".into());
+        s.prompt.target = Some("o1".into());
+        for _ in 0..3 {
+            press(&mut s, Key::Char('j'));
+        }
         press(&mut s, Key::Enter);
         assert_eq!(
             s.toast.as_ref().unwrap().0,
             "draft is for main: send or clear it first"
         );
         assert!(!s.prompt.open);
-        assert_eq!(s.prompt.target.as_deref(), Some("o4"));
+        assert_eq!(s.prompt.target.as_deref(), Some("o1"));
 
         let mut s = watching();
         s.prompt.text = "half a thought".into();
-        s.prompt.target = Some("o1".into());
+        s.prompt.target = Some("o4".into());
+        for _ in 0..3 {
+            press(&mut s, Key::Char('j'));
+        }
         assert_eq!(press(&mut s, Key::Enter), [Command::LoadSessions]);
         assert!(s.prompt.open && s.prompt.text == "half a thought");
     }
