@@ -922,6 +922,17 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_stamps_the_session_it_serves_on_the_question_card() {
+        let c = cfg(1, Mode::Always);
+        let (mut cl, _) = Client::start(&c);
+        ask(&mut cl);
+        let d = &c.store().list().0[0];
+        assert!(!d.is_answer());
+        assert_eq!(d.session, "owner-1");
+        assert_eq!(c.store().list_json()[0]["session"], "owner-1");
+    }
+
+    #[test]
     fn tell_user_files_an_answer_card_and_returns_at_once() {
         let c = cfg(0, Mode::Always);
         let (mut cl, _) = Client::start(&c);

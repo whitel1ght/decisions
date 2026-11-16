@@ -3,7 +3,7 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
 
-use crate::activity::{AgentActivity, Doing, Status};
+use crate::activity::{AgentActivity, Doing, Status, agent_order};
 use crate::transcript;
 
 /// A running agent silent for this long is shown as Unknown.
@@ -74,6 +74,7 @@ pub fn claude(session_dir: &Path, now: i64, detail: bool) -> Vec<AgentActivity> 
             doing,
         });
     }
+    out.sort_by(agent_order);
     out
 }
 
@@ -102,10 +103,12 @@ pub fn pi_sub(root: &Path, now: i64) -> Vec<(Option<u32>, AgentActivity)> {
             .or_else(|| str_field(&meta, "role"))
             .unwrap_or(id)
             .to_string();
-        let parent = meta
-            .get("parent_pid")
-            .and_then(Value::as_u64)
-            .and_then(|p| u32::try_from(p).ok());
+        let pid = |key| {
+            meta.get(key)
+                .and_then(Value::as_u64)
+                .and_then(|p| u32::try_from(p).ok())
+        };
+        let parent = pid("parent_pid").or_else(|| pid("owner_pid"));
         out.push((
             parent,
             AgentActivity {
@@ -116,6 +119,7 @@ pub fn pi_sub(root: &Path, now: i64) -> Vec<(Option<u32>, AgentActivity)> {
             },
         ));
     }
+    out.sort_by(|(_, a), (_, b)| agent_order(a, b));
     out
 }
 
@@ -246,5 +250,54 @@ mod tests {
         assert_eq!(got[1].0, Some(4242));
         assert_eq!(got[1].1.label, "research");
         assert_eq!(got[1].1.status, Status::Working);
+    }
+
+    #[test]
+    fn pi_sub_falls_back_to_the_owner_pid() {
+        let root = dir();
+        write(
+            &root.join("x1/meta.json"),
+            r#"{"label":"owned","owner_pid":31}"#,
+            1_000,
+        );
+        write(
+            &root.join("x2/meta.json"),
+            r#"{"label":"spawned","owner_pid":31,"parent_pid":42}"#,
+            2_000,
+        );
+        let got: Vec<_> = pi_sub(&root, NOW)
+            .into_iter()
+            .map(|(p, a)| (p, a.label))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (Some(42), "spawned".to_string()),
+                (Some(31), "owned".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn agents_come_oldest_first_then_by_label() {
+        let s = dir();
+        subagent(&s, "a1", r#"{"description":"Zeta"}"#, 1_000);
+        subagent(&s, "a2", r#"{"description":"Beta"}"#, 5_000);
+        subagent(&s, "a3", r#"{"description":"Alpha"}"#, 1_000);
+        let labels: Vec<_> = claude(&s, NOW, false)
+            .into_iter()
+            .map(|a| a.label)
+            .collect();
+        assert_eq!(labels, ["Beta", "Alpha", "Zeta"]);
+
+        let root = dir();
+        write(&root.join("x1/meta.json"), r#"{"label":"Zeta"}"#, 1_000);
+        write(&root.join("x2/meta.json"), r#"{"label":"Beta"}"#, 5_000);
+        write(&root.join("x3/meta.json"), r#"{"label":"Alpha"}"#, 1_000);
+        let labels: Vec<_> = pi_sub(&root, NOW)
+            .into_iter()
+            .map(|(_, a)| a.label)
+            .collect();
+        assert_eq!(labels, ["Beta", "Alpha", "Zeta"]);
     }
 }

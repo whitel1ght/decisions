@@ -1,6 +1,5 @@
+use std::cmp::Ordering;
 use std::path::PathBuf;
-
-use chrono::DateTime;
 
 use crate::agents;
 use crate::queue::Decision;
@@ -77,7 +76,16 @@ impl Activity {
     pub fn sort(&mut self) {
         self.sessions
             .sort_by_cached_key(|s| (s.status, s.session.label().to_lowercase()));
+        for s in &mut self.sessions {
+            s.agents.sort_by(agent_order);
+        }
+        self.others.sort_by(agent_order);
     }
+}
+
+/// Oldest first, then by label, so agent rows keep their places between scans.
+pub fn agent_order(a: &AgentActivity, b: &AgentActivity) -> Ordering {
+    a.since.cmp(&b.since).then_with(|| a.label.cmp(&b.label))
 }
 
 pub struct Signals<'a> {
@@ -124,35 +132,30 @@ impl Sources {
     }
 }
 
-fn asked_ms(card: &Decision) -> Option<i64> {
-    DateTime::parse_from_rfc3339(&card.asked)
-        .ok()
-        .map(|t| t.timestamp_millis())
-}
-
-fn source_prefix(s: &Session) -> String {
-    format!("{} · {}", s.client, s.dir_name())
+/// The card's source is the session's `harness · folder`, alone or followed by ` · `.
+fn from_session(source: &str, s: &Session) -> bool {
+    let prefix = format!("{} · {}", s.client, s.dir_name());
+    source
+        .strip_prefix(&prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(" · "))
 }
 
 fn oldest_card<'a>(s: &Session, cards: &'a [Decision], all: &[Session]) -> Option<&'a Decision> {
-    let prefix = source_prefix(s);
     let by_source = |card: &Decision| {
         card.session.is_empty()
-            && card.source.starts_with(&prefix)
-            && all
-                .iter()
-                .filter(|o| card.source.starts_with(&source_prefix(o)))
-                .count()
-                == 1
+            && from_session(&card.source, s)
+            && all.iter().filter(|o| from_session(&card.source, o)).count() == 1
     };
     cards
         .iter()
-        .filter(|c| !c.is_answer() && (c.session == s.owner || by_source(c)))
-        .min_by_key(|c| asked_ms(c).unwrap_or(i64::MAX))
+        .filter(|c| !c.is_answer() && !c.question_back)
+        .filter(|c| c.session == s.owner || by_source(c))
+        .min_by_key(|c| c.asked_ms().unwrap_or(i64::MAX))
 }
 
 /// The oldest open question card for `s`: one it owns, or an old one with no session whose
-/// source names only this session.
+/// source names only this session. A card the user asked back on waits on the session, not on
+/// the user, so it does not count.
 pub fn card_for(s: &Session, cards: &[Decision], all: &[Session]) -> Option<String> {
     oldest_card(s, cards, all).map(|c| c.id.clone())
 }
@@ -197,7 +200,7 @@ pub fn scan(
         });
         let own_since = (s.since > 0).then_some(s.since);
         let since = match status {
-            Status::Waiting => card.and_then(asked_ms),
+            Status::Waiting => card.and_then(Decision::asked_ms),
             Status::Working if s.is_claude() => transcript::turn_start(&records),
             Status::Idle if s.is_claude() => transcript::last_at(&records),
             Status::Working | Status::Idle => own_since,
@@ -324,6 +327,35 @@ mod tests {
         assert_eq!(labels, ["a", "c", "b", "d"]);
     }
 
+    #[test]
+    fn sort_puts_each_agent_list_oldest_first_then_by_label() {
+        let aged = |label: &str, since| AgentActivity {
+            label: label.into(),
+            since,
+            ..agent(Status::Working)
+        };
+        let list = || {
+            vec![
+                aged("z", Some(20)),
+                aged("y", Some(10)),
+                aged("b", Some(20)),
+                aged("n", None),
+            ]
+        };
+        let mut act = Activity {
+            sessions: vec![SessionActivity {
+                agents: list(),
+                ..row("s", Status::Working)
+            }],
+            others: list(),
+            at: 0,
+        };
+        act.sort();
+        let labels = |l: &[AgentActivity]| l.iter().map(|a| a.label.clone()).collect::<Vec<_>>();
+        assert_eq!(labels(&act.sessions[0].agents), ["n", "y", "b", "z"]);
+        assert_eq!(labels(&act.others), ["n", "y", "b", "z"]);
+    }
+
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -437,6 +469,51 @@ mod tests {
         c.kind = "answer".into();
         let s = claude("a", "idle");
         assert_eq!(card_for(&s, &[c], std::slice::from_ref(&s)), None);
+    }
+
+    #[test]
+    fn a_card_the_user_asked_back_on_does_not_make_a_session_wait() {
+        let src = sources();
+        let mut c = card("back", "a", "", "2026-11-05T20:00:00Z");
+        c.question_back = true;
+        let s = claude("a", "idle");
+        assert_eq!(
+            card_for(&s, std::slice::from_ref(&c), std::slice::from_ref(&s)),
+            None
+        );
+        let act = scan(&src, vec![s], &[c], NOW, false);
+        assert_eq!(act.sessions[0].status, Status::Idle);
+    }
+
+    #[test]
+    fn a_source_matches_its_folder_exactly_or_before_a_separator() {
+        let alpha = Session {
+            cwd: "/work/alpha".into(),
+            ..claude("a", "idle")
+        };
+        let alphabet = Session {
+            cwd: "/work/alphabet".into(),
+            pid: 11,
+            ..claude("b", "idle")
+        };
+        let cards = [card(
+            "x",
+            "",
+            "claude-code · alphabet",
+            "2026-11-05T20:00:00Z",
+        )];
+        let all = [alpha.clone(), alphabet.clone()];
+        assert_eq!(card_for(&alpha, &cards, &all), None);
+        assert_eq!(card_for(&alphabet, &cards, &all), Some("x".into()));
+        let only = std::slice::from_ref(&alpha);
+        assert_eq!(card_for(&alpha, &cards, only), None);
+        let tagged = [card(
+            "y",
+            "",
+            "claude-code · alpha · review",
+            "2026-11-05T20:00:00Z",
+        )];
+        assert_eq!(card_for(&alpha, &tagged, &all), Some("y".into()));
     }
 
     #[test]
