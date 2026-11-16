@@ -1,5 +1,6 @@
 //! The deck's backend for the real queue: the store in process, plus the on_answer hook.
 
+use crate::activity::{self, Activity, Sources};
 use crate::colors;
 use crate::config::Config;
 use crate::hook;
@@ -59,6 +60,19 @@ impl Backend for Live {
             &cards,
             chrono::Local::now().fixed_offset(),
             days,
+        ))
+    }
+
+    fn activity(&self, detail: bool) -> Result<Activity, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        Ok(activity::scan(
+            &Sources::from_env(),
+            sessions::running(&self.dir),
+            &self.store.list().0,
+            now,
+            detail,
         ))
     }
 

@@ -6,7 +6,9 @@
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::activity::{Activity, AgentActivity, Doing, SessionActivity, Status};
 use crate::queue::{Backend, Decision, Entry, Opt};
+use crate::sessions::Session;
 use crate::theme::Icons;
 
 /// The card whose answer always fails (failed-send badge, retry, quit warning).
@@ -419,6 +421,75 @@ impl Backend for Demo {
         Ok(None)
     }
 
+    fn activity(&self, _detail: bool) -> Result<Activity, String> {
+        let now = (self.clock)();
+        let session = |owner: &str, name: &str, client: &str, cwd: &str| Session {
+            owner: owner.into(),
+            name: name.into(),
+            client: client.into(),
+            cwd: cwd.into(),
+            ..Session::default()
+        };
+        let doing = |text: &str, ago: i64| {
+            Some(Doing {
+                text: text.into(),
+                at: Some(now - ago),
+            })
+        };
+        let session_activity = |session, status, since: i64| SessionActivity {
+            session,
+            status,
+            since: Some(now - since),
+            doing: None,
+            agents: Vec::new(),
+            card: None,
+        };
+        let mut system = session_activity(
+            session("demo-1", "the system", "claude-code", "/demo/dotfiles"),
+            Status::Working,
+            12 * MIN,
+        );
+        system.doing = doing("Edit src/app.rs", 20_000);
+        system.agents = vec![AgentActivity {
+            label: "reviewer".into(),
+            status: Status::Working,
+            since: Some(now - 3 * MIN),
+            doing: doing("Read src/queue.rs", 5_000),
+        }];
+        let mut backend = session_activity(
+            session("demo-4", "ACME-1001", "claude-code", "/demo/backend"),
+            Status::Working,
+            4 * MIN,
+        );
+        backend.doing = doing("Bash cargo test", 8_000);
+        let mut waiting = session_activity(
+            session("demo-5", "ACME-1003", "claude-code", "/demo/dashboard"),
+            Status::Waiting,
+            250 * MIN,
+        );
+        waiting.card = Some("D-1".into());
+        let idle = session_activity(
+            session("demo-2", "ACME-1004", "claude-code", "/demo/dashboard"),
+            Status::Idle,
+            35 * MIN,
+        );
+        let unknown = SessionActivity {
+            since: None,
+            ..session_activity(
+                session("demo-3", "ACME-1009", "pi", "/demo/backend"),
+                Status::Unknown,
+                0,
+            )
+        };
+        let mut activity = Activity {
+            sessions: vec![system, backend, waiting, idle, unknown],
+            others: Vec::new(),
+            at: now,
+        };
+        activity.sort();
+        Ok(activity)
+    }
+
     fn sessions(&self) -> Vec<crate::sessions::Session> {
         use crate::sessions::Session;
         [
@@ -537,6 +608,23 @@ mod tests {
 
     fn age(d: &Decision, now: i64) -> i64 {
         now - d.asked_ms().unwrap()
+    }
+
+    #[test]
+    fn demo_activity_has_every_state() {
+        let (demo, _) = demo();
+        let a = demo.activity(false).unwrap();
+        assert_eq!(
+            (a.working(), a.waiting(), a.idle(), a.unknown()),
+            (2, 1, 1, 1)
+        );
+        let waiting = a
+            .sessions
+            .iter()
+            .find(|s| s.status == crate::activity::Status::Waiting)
+            .unwrap();
+        assert_eq!(waiting.card.as_deref(), Some("D-1"));
+        assert!(demo.list().unwrap().iter().any(|d| d.id == "D-1"));
     }
 
     #[test]

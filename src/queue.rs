@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::activity::Activity;
 use crate::prompt::Image;
 use crate::sessions::Session;
 use crate::stats::{self, Stats};
@@ -105,6 +106,11 @@ pub trait Backend: Send + Sync {
             chrono::Local::now().fixed_offset(),
             days,
         ))
+    }
+    /// Which sessions are working, waiting on the user, idle or unknown; `detail` also reads
+    /// what each one is doing.
+    fn activity(&self, _detail: bool) -> Result<Activity, String> {
+        Ok(Activity::default())
     }
     /// The running sessions a prompt can reach.
     fn sessions(&self) -> Vec<Session>;
