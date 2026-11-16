@@ -25,6 +25,9 @@ pub struct Cli {
     /// Open the deck with the prompt line open, to message a running session
     #[arg(long)]
     pub prompt: bool,
+    /// Open the deck on the activity screen: what every session is doing
+    #[arg(long)]
+    pub activity: bool,
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
 }
@@ -160,7 +163,7 @@ fn told(cfg: &Config, r: crate::store::Result<Event>) -> ExitCode {
 pub fn run(cli: Cli, cfg: &Config) -> ExitCode {
     let store = cfg.store();
     let Some(cmd) = cli.cmd else {
-        return tui::run(cfg, cli.demo, cli.prompt);
+        return tui::run(cfg, cli.demo, cli.prompt, cli.activity);
     };
     match cmd {
         Cmd::Mcp => match mcp::serve(std::io::stdin().lock(), std::io::stdout(), cfg) {

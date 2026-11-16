@@ -42,6 +42,7 @@ struct Runner {
     tx: mpsc::Sender<Event>,
     in_flight: usize,
     loading: bool,
+    loading_activity: bool,
     reload_again: bool,
 }
 
@@ -55,6 +56,14 @@ impl Runner {
                 thread::spawn(move || {
                     let _ = tx.send(Event::StatsLoaded(decide.stats(STATS_DAYS).map(Box::new)));
                 });
+            }
+            Command::LoadActivity { detail } => {
+                if !self.loading_activity {
+                    self.loading_activity = true;
+                    self.background(move |d| {
+                        Event::ActivityLoaded(d.activity(detail).map(Box::new))
+                    });
+                }
             }
             Command::Answer { id, n, note } => {
                 self.send(id, false, move |d, id| d.answer(id, n, note.as_deref()))
@@ -177,7 +186,7 @@ fn watch(dir: PathBuf, tx: mpsc::Sender<Event>) -> Option<Debouncer<RecommendedW
     Some(debouncer)
 }
 
-pub fn run(cfg: &crate::config::Config, demo: bool, prompt: bool) -> ExitCode {
+pub fn run(cfg: &crate::config::Config, demo: bool, prompt: bool, activity: bool) -> ExitCode {
     let (backend, reload_every): (Arc<dyn Backend>, Duration) = if demo {
         (Arc::new(Demo::new(cfg.icons)), DEMO_RELOAD_EVERY)
     } else {
@@ -217,12 +226,21 @@ pub fn run(cfg: &crate::config::Config, demo: bool, prompt: bool) -> ExitCode {
         tx,
         in_flight: 0,
         loading: false,
+        loading_activity: false,
         reload_again: false,
     };
     runner.reload();
     if prompt {
         let mut first = Vec::new();
         app::open_prompt(&mut s, &mut first);
+        for cmd in first {
+            runner.run(cmd);
+        }
+    }
+
+    if activity {
+        let mut first = Vec::new();
+        app::open_activity(&mut s, &mut first);
         for cmd in first {
             runner.run(cmd);
         }
@@ -246,7 +264,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool, prompt: bool) -> ExitCode {
 
         let frame = if fx.running() || s.animating() {
             Duration::from_millis(16)
-        } else if areas.empty.is_some() {
+        } else if areas.empty.is_some() || s.spinning() {
             Duration::from_millis(100)
         } else {
             Duration::from_secs(1)
@@ -265,7 +283,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool, prompt: bool) -> ExitCode {
         if due {
             next_tick = Instant::now() + Duration::from_secs(1);
         }
-        if due || s.animating() {
+        if due || s.animating() || s.spinning() {
             events.push(Event::Tick);
         }
         if Instant::now() >= next_reload {
@@ -276,6 +294,7 @@ pub fn run(cfg: &crate::config::Config, demo: bool, prompt: bool) -> ExitCode {
             match &ev {
                 Event::Key(_) => fx.finish(),
                 Event::Loaded(_) => runner.loaded(),
+                Event::ActivityLoaded(_) => runner.loading_activity = false,
                 Event::Sent { .. } | Event::PromptSent(_) => runner.in_flight -= 1,
                 _ => {}
             }

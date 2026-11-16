@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::activity::{Activity, Status};
 use crate::edit::{self, Edit};
 use crate::prompt::{self, Image};
 use crate::queue::Decision;
@@ -20,6 +21,9 @@ const HALF_PAGE: u16 = 10;
 const FILE_ROWS: usize = 8;
 /// How often the open prompt line re-reads the running sessions.
 const SESSIONS_EVERY_MS: i64 = 5_000;
+/// How often the activity scan runs with its screen open, and with only the header showing.
+const ACTIVITY_OPEN_MS: i64 = 3_000;
+const ACTIVITY_SHUT_MS: i64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -54,6 +58,8 @@ pub enum Event {
     Signal,
     /// The statistics asked for with `S` are ready.
     StatsLoaded(Result<Box<Stats>, String>),
+    /// A scan of what the sessions are doing finished; a failed one changes nothing.
+    ActivityLoaded(Result<Box<Activity>, String>),
     /// Text pasted into the terminal, in one piece.
     Paste(String),
     SessionsLoaded {
@@ -77,6 +83,9 @@ pub enum Event {
 pub enum Command {
     Reload,
     LoadStats,
+    LoadActivity {
+        detail: bool,
+    },
     Answer {
         id: String,
         n: u8,
@@ -278,6 +287,11 @@ pub struct State {
     pub help: bool,
     /// The stats screen, while it is open.
     pub stats: Option<Stats>,
+    /// The last activity scan; it drives the header and the activity screen.
+    pub activity: Activity,
+    pub activity_open: bool,
+    pub activity_cur: usize,
+    pub activity_asked: i64,
     pub error: Option<String>,
     pub toast: Option<(String, i64)>,
     pub ghost: Option<(Decision, i64)>,
@@ -337,6 +351,11 @@ impl State {
         self.ghost.is_some() || self.flip.is_some()
     }
 
+    /// A session is at work, so the header spinner needs frames.
+    pub fn spinning(&self) -> bool {
+        self.activity.working() > 0
+    }
+
     fn toast(&mut self, msg: String) {
         self.toast = Some((msg, self.now + TOAST_MS));
     }
@@ -358,6 +377,13 @@ pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
         Event::Loaded(Err(e)) => s.error = Some(e),
         Event::StatsLoaded(Ok(st)) => s.stats = Some(*st),
         Event::StatsLoaded(Err(e)) => s.toast(format!("stats failed: {e}")),
+        Event::ActivityLoaded(Ok(a)) => {
+            s.activity = *a;
+            s.activity_cur = s
+                .activity_cur
+                .min(s.activity.sessions.len().saturating_sub(1));
+        }
+        Event::ActivityLoaded(Err(_)) => {}
         Event::Sent { id, ask, result } => sent(s, id, ask, result, &mut out),
         Event::Paste(text) => paste(s, text, &mut out),
         Event::SessionsLoaded { sessions, last } => sessions_loaded(s, sessions, last, &mut out),
@@ -385,6 +411,17 @@ pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
 }
 
 fn tick(s: &mut State, out: &mut Vec<Command>) {
+    let every = if s.activity_open {
+        ACTIVITY_OPEN_MS
+    } else {
+        ACTIVITY_SHUT_MS
+    };
+    if s.now - s.activity_asked >= every {
+        s.activity_asked = s.now;
+        out.push(Command::LoadActivity {
+            detail: s.activity_open,
+        });
+    }
     if s.prompt.open && s.now - s.prompt.loaded_at >= SESSIONS_EVERY_MS {
         s.prompt.loaded_at = s.now;
         out.push(Command::LoadSessions);
@@ -479,7 +516,7 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
     if s.prompt.open {
         return prompt_key(s, k, out);
     }
-    if k == Key::Tab && !s.help && s.stats.is_none() {
+    if k == Key::Tab && !s.help && s.stats.is_none() && !s.activity_open {
         return message_session(s, out);
     }
     if s.input.is_some() {
@@ -495,6 +532,9 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         }
         return;
     }
+    if s.activity_open {
+        return activity_key(s, k, out);
+    }
     match k {
         Key::Char('q') => quit(s, out),
         Key::Esc if s.side == Side::Back => flip(s),
@@ -507,12 +547,55 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         Key::Char('r') => out.push(Command::Reload),
         Key::Char('?') => s.help = true,
         Key::Char('S') => out.push(Command::LoadStats),
+        Key::Char('w') => open_activity(s, out),
         Key::Space => flip(s),
         Key::Char('J') => go(s, s.cur + 1),
         Key::Char('K') if s.cur > 0 => go(s, s.cur - 1),
         _ if s.side == Side::Back => back_key(s, k),
         _ => front_key(s, k, out),
     }
+}
+
+/// `w`, or `decisions --activity`: the screen of what every session is doing.
+pub fn open_activity(s: &mut State, out: &mut Vec<Command>) {
+    s.activity_open = true;
+    s.activity_cur = 0;
+    out.push(Command::LoadActivity { detail: true });
+}
+
+fn activity_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
+    let last = s.activity.sessions.len().saturating_sub(1);
+    match k {
+        Key::Esc | Key::Char('w' | 'q') => s.activity_open = false,
+        Key::Char('j') | Key::Down => s.activity_cur = (s.activity_cur + 1).min(last),
+        Key::Char('k') | Key::Up => s.activity_cur = s.activity_cur.saturating_sub(1),
+        Key::Enter => activity_enter(s, out),
+        _ => {}
+    }
+}
+
+fn activity_enter(s: &mut State, out: &mut Vec<Command>) {
+    let Some(row) = s.activity.sessions.get(s.activity_cur) else {
+        return;
+    };
+    let (status, card) = (row.status, row.card.clone());
+    let (owner, label) = (row.session.owner.clone(), row.session.label().to_string());
+    if status == Status::Waiting {
+        let Some(id) = card else {
+            return s.toast("answer it in the session".into());
+        };
+        let Some(idx) = s.queue.iter().position(|d| d.id == id) else {
+            return s.toast("card not in the deck".into());
+        };
+        s.activity_open = false;
+        return go(s, idx);
+    }
+    let draft = !s.prompt.text.is_empty() || !s.prompt.images.is_empty();
+    if draft && s.prompt.target.as_ref().is_some_and(|t| *t != owner) {
+        return s.toast(format!("draft is for {label}: send or clear it first"));
+    }
+    s.prompt.target = Some(owner);
+    open_prompt(s, out);
 }
 
 /// On the front, j/k (and the arrows) move between the card's options; J/K change cards.
@@ -1250,6 +1333,7 @@ fn sent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::SessionActivity;
     use crate::queue::decode;
 
     pub const T0: i64 = 1_792_483_448_000;
@@ -1275,6 +1359,17 @@ mod tests {
         update(&mut s, Event::Loaded(Ok(list)), T0);
         s.anims.clear();
         s
+    }
+
+    /// `update` without the activity scan a tick asks for, so a tick returns only what a test
+    /// is about; the scan has its own test, through `super::update`.
+    pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
+        let ticking = ev == Event::Tick;
+        let mut out = super::update(s, ev, now);
+        if ticking {
+            out.retain(|c| !matches!(c, Command::LoadActivity { .. }));
+        }
+        out
     }
 
     pub fn press(s: &mut State, k: Key) -> Vec<Command> {
@@ -1493,6 +1588,168 @@ mod tests {
         }
         update(&mut s, Event::StatsLoaded(Err("boom".into())), T0);
         assert!(s.stats.is_none() && s.toast.is_some());
+    }
+
+    fn row(owner: &str, name: &str, status: Status, card: Option<&str>) -> SessionActivity {
+        SessionActivity {
+            session: session(owner, name),
+            status,
+            since: None,
+            doing: None,
+            agents: Vec::new(),
+            card: card.map(String::from),
+        }
+    }
+
+    /// A deck of three cards with the activity screen open on four rows.
+    fn watching() -> State {
+        let mut s = loaded(many(3));
+        press(&mut s, Key::Char('w'));
+        let activity = Activity {
+            sessions: vec![
+                row("o1", "main", Status::Working, None),
+                row("o2", "ACME-1", Status::Waiting, Some("D-3")),
+                row("o3", "ACME-2", Status::Waiting, None),
+                row("o4", "ACME-3", Status::Idle, None),
+            ],
+            ..Activity::default()
+        };
+        update(&mut s, Event::ActivityLoaded(Ok(Box::new(activity))), T0);
+        s
+    }
+
+    #[test]
+    fn w_opens_the_activity_screen_and_esc_w_q_close_it() {
+        let mut s = loaded(many(2));
+        assert_eq!(
+            press(&mut s, Key::Char('w')),
+            [Command::LoadActivity { detail: true }]
+        );
+        for k in [Key::Esc, Key::Char('w'), Key::Char('q')] {
+            assert!(s.activity_open);
+            assert!(press(&mut s, k).is_empty(), "{k:?} does not quit");
+            assert!(!s.activity_open);
+            press(&mut s, Key::Char('w'));
+        }
+        assert!(press(&mut s, Key::Tab).is_empty());
+        assert!(s.activity_open && !s.prompt.open);
+
+        let mut s = loaded(many(2));
+        press(&mut s, Key::Char('?'));
+        assert!(press(&mut s, Key::Char('w')).is_empty() && !s.activity_open);
+    }
+
+    #[test]
+    fn j_and_k_move_over_the_rows_and_stop_at_the_ends() {
+        let mut s = watching();
+        press(&mut s, Key::Char('k'));
+        assert_eq!(s.activity_cur, 0);
+        press(&mut s, Key::Char('j'));
+        press(&mut s, Key::Down);
+        assert_eq!(s.activity_cur, 2);
+        for _ in 0..5 {
+            press(&mut s, Key::Char('j'));
+        }
+        assert_eq!(s.activity_cur, 3);
+        press(&mut s, Key::Up);
+        assert_eq!(s.activity_cur, 2);
+    }
+
+    #[test]
+    fn tick_asks_for_activity_every_five_seconds_or_three_when_open() {
+        let mut s = loaded(many(1));
+        assert_eq!(
+            super::update(&mut s, Event::Tick, T0),
+            [Command::LoadActivity { detail: false }]
+        );
+        assert_eq!(s.activity_asked, T0);
+        assert!(super::update(&mut s, Event::Tick, T0 + 4_999).is_empty());
+        assert_eq!(
+            super::update(&mut s, Event::Tick, T0 + 5_000),
+            [Command::LoadActivity { detail: false }]
+        );
+        press(&mut s, Key::Char('w'));
+        let now = T0 + 5_000;
+        assert!(super::update(&mut s, Event::Tick, now + 2_999).is_empty());
+        assert_eq!(
+            super::update(&mut s, Event::Tick, now + 3_000),
+            [Command::LoadActivity { detail: true }]
+        );
+    }
+
+    #[test]
+    fn enter_on_a_waiting_row_brings_its_card_to_the_front() {
+        let mut s = watching();
+        press(&mut s, Key::Char('j'));
+        assert!(press(&mut s, Key::Enter).is_empty());
+        assert!(!s.activity_open);
+        assert_eq!(s.current().unwrap().id, "D-3");
+
+        let mut s = watching();
+        s.activity.sessions[1].card = Some("D-9".into());
+        press(&mut s, Key::Char('j'));
+        press(&mut s, Key::Enter);
+        assert_eq!(s.toast.as_ref().unwrap().0, "card not in the deck");
+
+        let mut s = watching();
+        press(&mut s, Key::Char('j'));
+        press(&mut s, Key::Char('j'));
+        press(&mut s, Key::Enter);
+        assert_eq!(s.toast.as_ref().unwrap().0, "answer it in the session");
+        assert!(s.activity_open && !s.prompt.open);
+    }
+
+    #[test]
+    fn enter_on_an_idle_row_aims_the_prompt_at_it() {
+        let mut s = watching();
+        for _ in 0..3 {
+            press(&mut s, Key::Char('j'));
+        }
+        assert_eq!(press(&mut s, Key::Enter), [Command::LoadSessions]);
+        assert!(s.prompt.open);
+        assert_eq!(s.prompt.target.as_deref(), Some("o4"));
+        press(&mut s, Key::Esc);
+        assert!(
+            !s.prompt.open && s.activity_open,
+            "esc lands back on the screen"
+        );
+    }
+
+    #[test]
+    fn enter_keeps_a_draft_aimed_elsewhere() {
+        let mut s = watching();
+        s.prompt.text = "half a thought".into();
+        s.prompt.target = Some("o4".into());
+        press(&mut s, Key::Enter);
+        assert_eq!(
+            s.toast.as_ref().unwrap().0,
+            "draft is for main: send or clear it first"
+        );
+        assert!(!s.prompt.open);
+        assert_eq!(s.prompt.target.as_deref(), Some("o4"));
+
+        let mut s = watching();
+        s.prompt.text = "half a thought".into();
+        s.prompt.target = Some("o1".into());
+        assert_eq!(press(&mut s, Key::Enter), [Command::LoadSessions]);
+        assert!(s.prompt.open && s.prompt.text == "half a thought");
+    }
+
+    #[test]
+    fn a_failed_scan_keeps_the_last_picture() {
+        let mut s = watching();
+        press(&mut s, Key::Char('j'));
+        update(&mut s, Event::ActivityLoaded(Err("boom".into())), T0);
+        assert_eq!(s.activity.sessions.len(), 4);
+        assert_eq!(s.toast, None);
+        assert_eq!(s.activity_cur, 1);
+        let shorter = Activity {
+            sessions: vec![row("o1", "main", Status::Idle, None)],
+            ..Activity::default()
+        };
+        update(&mut s, Event::ActivityLoaded(Ok(Box::new(shorter))), T0);
+        assert_eq!(s.activity_cur, 0);
+        assert!(!s.spinning());
     }
 
     #[test]
