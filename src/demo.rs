@@ -87,6 +87,51 @@ fn card(
     }
 }
 
+/// The sessions the demo runs; `activity()` shows each of them, so a row's session can be
+/// prompted.
+fn demo_sessions() -> Vec<Session> {
+    [
+        (
+            "demo-1",
+            "the system",
+            "claude-code",
+            "/demo/dotfiles",
+            "working",
+        ),
+        (
+            "demo-2",
+            "ACME-1004",
+            "claude-code",
+            "/demo/dashboard",
+            "idle",
+        ),
+        ("demo-3", "ACME-1009", "pi", "/demo/backend", ""),
+        (
+            "demo-4",
+            "ACME-1001",
+            "claude-code",
+            "/demo/backend",
+            "working",
+        ),
+        (
+            "demo-5",
+            "ACME-1003",
+            "claude-code",
+            "/demo/dashboard",
+            "idle",
+        ),
+    ]
+    .map(|(owner, name, client, cwd, state)| Session {
+        owner: owner.into(),
+        name: name.into(),
+        client: client.into(),
+        cwd: cwd.into(),
+        state: state.into(),
+        ..Session::default()
+    })
+    .to_vec()
+}
+
 fn entry(who: &str, text: &str) -> Entry {
     Entry {
         at: "demo".into(),
@@ -423,12 +468,11 @@ impl Backend for Demo {
 
     fn activity(&self, _detail: bool) -> Result<Activity, String> {
         let now = (self.clock)();
-        let session = |owner: &str, name: &str, client: &str, cwd: &str| Session {
-            owner: owner.into(),
-            name: name.into(),
-            client: client.into(),
-            cwd: cwd.into(),
-            ..Session::default()
+        let session = |owner: &str| {
+            demo_sessions()
+                .into_iter()
+                .find(|s| s.owner == owner)
+                .expect("a demo session")
         };
         let doing = |text: &str, ago: i64| {
             Some(Doing {
@@ -444,11 +488,7 @@ impl Backend for Demo {
             agents: Vec::new(),
             card: None,
         };
-        let mut system = session_activity(
-            session("demo-1", "the system", "claude-code", "/demo/dotfiles"),
-            Status::Working,
-            12 * MIN,
-        );
+        let mut system = session_activity(session("demo-1"), Status::Working, 12 * MIN);
         system.doing = doing("Edit src/app.rs", 20_000);
         system.agents = vec![AgentActivity {
             label: "reviewer".into(),
@@ -456,30 +496,14 @@ impl Backend for Demo {
             since: Some(now - 3 * MIN),
             doing: doing("Read src/queue.rs", 5_000),
         }];
-        let mut backend = session_activity(
-            session("demo-4", "ACME-1001", "claude-code", "/demo/backend"),
-            Status::Working,
-            4 * MIN,
-        );
+        let mut backend = session_activity(session("demo-4"), Status::Working, 4 * MIN);
         backend.doing = doing("Bash cargo test", 8_000);
-        let mut waiting = session_activity(
-            session("demo-5", "ACME-1003", "claude-code", "/demo/dashboard"),
-            Status::Waiting,
-            250 * MIN,
-        );
+        let mut waiting = session_activity(session("demo-5"), Status::Waiting, 250 * MIN);
         waiting.card = Some("D-1".into());
-        let idle = session_activity(
-            session("demo-2", "ACME-1004", "claude-code", "/demo/dashboard"),
-            Status::Idle,
-            35 * MIN,
-        );
+        let idle = session_activity(session("demo-2"), Status::Idle, 35 * MIN);
         let unknown = SessionActivity {
             since: None,
-            ..session_activity(
-                session("demo-3", "ACME-1009", "pi", "/demo/backend"),
-                Status::Unknown,
-                0,
-            )
+            ..session_activity(session("demo-3"), Status::Unknown, 0)
         };
         let mut activity = Activity {
             sessions: vec![system, backend, waiting, idle, unknown],
@@ -490,34 +514,8 @@ impl Backend for Demo {
         Ok(activity)
     }
 
-    fn sessions(&self) -> Vec<crate::sessions::Session> {
-        use crate::sessions::Session;
-        [
-            (
-                "demo-1",
-                "the system",
-                "claude-code",
-                "/demo/dotfiles",
-                "working",
-            ),
-            (
-                "demo-2",
-                "ACME-1004",
-                "claude-code",
-                "/demo/dashboard",
-                "idle",
-            ),
-            ("demo-3", "ACME-1009", "pi", "/demo/backend", ""),
-        ]
-        .map(|(owner, name, client, cwd, state)| Session {
-            owner: owner.into(),
-            name: name.into(),
-            client: client.into(),
-            cwd: cwd.into(),
-            state: state.into(),
-            ..Session::default()
-        })
-        .to_vec()
+    fn sessions(&self) -> Vec<Session> {
+        demo_sessions()
     }
 
     fn last_target(&self) -> Option<String> {
@@ -625,6 +623,15 @@ mod tests {
             .unwrap();
         assert_eq!(waiting.card.as_deref(), Some("D-1"));
         assert!(demo.list().unwrap().iter().any(|d| d.id == "D-1"));
+    }
+
+    #[test]
+    fn every_activity_session_can_be_prompted() {
+        let (demo, _) = demo();
+        let owners: Vec<String> = demo.sessions().into_iter().map(|s| s.owner).collect();
+        for row in demo.activity(false).unwrap().sessions {
+            assert!(owners.contains(&row.session.owner), "{}", row.session.owner);
+        }
     }
 
     #[test]
