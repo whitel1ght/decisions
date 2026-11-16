@@ -94,9 +94,7 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
     let frame = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme::LAVENDER))
-        .title(
-            Line::from(header(s)).style(Style::new().fg(theme::BLUE).add_modifier(Modifier::BOLD)),
-        )
+        .title(header(s).style(Style::new().fg(theme::BLUE).add_modifier(Modifier::BOLD)))
         .title_bottom(Line::from(footer(s)).style(Style::new().fg(theme::MUTED)));
     let mut rows = frame.inner(area);
     f.render_widget(frame, area);
@@ -154,7 +152,7 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
     drawn
 }
 
-fn header(s: &State) -> String {
+fn header(s: &State) -> Line<'static> {
     let name = if s.demo {
         format!("{} · demo", s.title)
     } else {
@@ -184,10 +182,22 @@ fn header(s: &State) -> String {
             age_label(s.oldest_ms())
         ),
     };
-    format!("{}{} ", text.trim_end(), activity_parts(s))
+    let mut spans = vec![Span::raw(format!(
+        "{}{}",
+        text.trim_end(),
+        activity_parts(s)
+    ))];
+    if let n @ 1.. = s.activity.unknown() {
+        spans.push(Span::styled(
+            format!(" · ? {n}"),
+            Style::new().fg(theme::MUTED),
+        ));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
 }
 
-/// What the sessions are doing, after the deck's own counts and only when non-zero.
+/// The working and waiting parts, after the deck's own counts and only when non-zero.
 fn activity_parts(s: &State) -> String {
     let mut parts = String::new();
     match s.activity.working() {
@@ -197,10 +207,6 @@ fn activity_parts(s: &State) -> String {
     match s.activity.waiting() {
         0 => {}
         n => parts.push_str(&format!(" · {} {n}", s.icons.hand)),
-    }
-    match s.activity.unknown() {
-        0 => {}
-        n => parts.push_str(&format!(" · ? {n}")),
     }
     parts
 }
@@ -1164,7 +1170,7 @@ struct Row<'a> {
 fn activity_row(s: &State, r: Row) -> Line<'static> {
     let accent = r.status == Status::Idle;
     let mark_color = match r.status {
-        Status::Idle => theme::LAVENDER,
+        Status::Idle => theme::MUTED,
         Status::Waiting => theme::YELLOW,
         Status::Working => theme::GREEN,
         Status::Unknown => theme::MUTED,
@@ -1204,7 +1210,7 @@ fn activity_screen(f: &mut Frame, area: Rect, s: &State) {
         a.idle(),
         a.unknown(),
     );
-    let mut lines = vec![
+    let heading = vec![
         Line::styled(
             title,
             Style::new().fg(theme::BLUE).add_modifier(Modifier::BOLD),
@@ -1214,6 +1220,9 @@ fn activity_screen(f: &mut Frame, area: Rect, s: &State) {
             Style::new().fg(theme::MUTED),
         ),
     ];
+    let [top, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    f.render_widget(Paragraph::new(heading), top);
+    let mut lines: Vec<Line> = Vec::new();
     if a.sessions.is_empty() && a.others.is_empty() {
         lines.push(Line::styled(
             " no agent sessions running",
@@ -1277,9 +1286,16 @@ fn activity_screen(f: &mut Frame, area: Rect, s: &State) {
             lines.push(agent_row(ag, false));
         }
     }
-    let skip = (cursor_line + 1).saturating_sub(usize::from(area.height));
+    let height = usize::from(list.height);
+    let last_session = s.activity_cur + 1 >= a.sessions.len();
+    let reach = if last_session {
+        lines.len()
+    } else {
+        cursor_line + 1
+    };
+    let skip = reach.saturating_sub(height).min(cursor_line);
     let shown: Vec<Line> = lines.into_iter().skip(skip).collect();
-    f.render_widget(Paragraph::new(shown), area);
+    f.render_widget(Paragraph::new(shown), list);
 }
 
 fn help(f: &mut Frame, s: &State, area: Rect) {
@@ -1836,6 +1852,8 @@ mod tests {
         );
         let (x, y) = find(&buf, "idle 14m");
         assert_eq!(buf[(x, y)].fg, theme::LAVENDER);
+        let (x, y) = find(&buf, "○");
+        assert_eq!(buf[(x, y)].fg, theme::MUTED, "only the idle word is accent");
         let (x, y) = find(&buf, "working 3m");
         assert_eq!(buf[(x, y)].fg, theme::TEXT);
     }
@@ -1873,6 +1891,49 @@ mod tests {
         assert_eq!(buf[(x, y)].fg, theme::GREEN);
         let (x, y) = find(&buf, "ACME-1");
         assert_eq!(buf[(x, y)].fg, theme::TEXT);
+    }
+
+    #[test]
+    fn the_unknown_count_in_the_header_is_dim() {
+        let mut s = watching(fixture());
+        s.activity_open = false;
+        s.activity.sessions[0].status = Status::Unknown;
+        let (buf, _) = render(&s, 100, 24);
+        assert!(screen(&buf).contains("? 1"));
+        let (x, y) = find(&buf, "? 1");
+        assert_eq!(buf[(x, y)].fg, theme::MUTED);
+        let (x, y) = find(&buf, "working");
+        assert_eq!(buf[(x, y)].fg, theme::BLUE);
+    }
+
+    #[test]
+    fn a_short_window_keeps_the_title_and_reaches_other_agents() {
+        let mut s = watching(fixture());
+        let template = s.activity.sessions[0].clone();
+        s.activity.sessions = (0..30)
+            .map(|i| {
+                let mut r = template.clone();
+                r.session.name = format!("sess-{i:02}");
+                r
+            })
+            .collect();
+        s.activity.others = vec![AgentActivity {
+            label: "stray-agent".into(),
+            status: Status::Working,
+            since: None,
+            doing: None,
+        }];
+        s.activity_cur = 29;
+        let all = screen(&render(&s, 100, 14).0);
+        assert!(all.contains("activity · "), "{all}");
+        assert!(all.contains("sess-29"), "{all}");
+        assert!(all.contains("stray-agent"), "{all}");
+        s.activity_cur = 0;
+        let all = screen(&render(&s, 100, 14).0);
+        assert!(
+            all.contains("activity · ") && all.contains("sess-00"),
+            "{all}"
+        );
     }
 
     #[test]
