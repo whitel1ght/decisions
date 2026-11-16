@@ -143,6 +143,21 @@ it into a prompt. There is none in this repo: the harness side lists open answer
 own file tool, which is one tool call more than a typed `@`. A session busy with a turn gets the
 message when the turn ends.
 
+## Activity
+
+`w` in the deck (or `decisions --activity` to open on it) shows what every running session is
+doing: working (with its current tool or subagents), idle, or waiting on you (a question card it
+filed is open). A session sitting idle is a session you can hand a task, so the screen is for
+spotting them; the main view's header shows a spinner and a count while any session works. Claude
+Code sessions are read from their transcripts, pi's subagents from pi's state, and a harness can
+report itself with `decisions session-state --pid PID working|idle` (exit 1 if no session is
+registered for that pid).
+
+`decisions count --badge` adds a working segment in front, `⟳ N` (the Nerd Font icon U+F110 with
+`icons = "nerd"`). `DECISIONS_ACTIVITY=0` skips the scan for the badge. `CLAUDE_CONFIG_DIR`
+(default `~/.claude`) and `PI_SUB_DIR` (default `~/.local/state/pi-sub`) say where the transcripts
+and pi's subagent state are read from.
+
 ## Answering
 
 | Key | |
@@ -162,6 +177,7 @@ message when the turn ends.
 | `o` | open the link (MR, PR, ticket) |
 | `r` | reload |
 | `S` | stats screen: answered and withdrawn per day, median time to answer, summary (esc or `S` returns) |
+| `w` | activity screen: what every session is doing (esc, `w` or `q` returns) |
 | `Tab` | the prompt line: message a running session (`@` file, `#` session, `^v` image) |
 | `?` | all the keys |
 | `q / esc` | send pending answers and close |
@@ -231,6 +247,8 @@ context = "full"         # "full" | "none": include each card's context in its m
 |---|---|
 | `DECISIONS_DIR` | where the queue lives (default `~/.local/state/decisions`) |
 | `DECISIONS_WAIT`, `DECISIONS_MODE`, `DECISIONS_ON_ANSWER`, `DECISIONS_MR_STRIP`, `DECISIONS_TITLE`, `DECISIONS_BADGE`, `DECISIONS_ICONS` | the config keys |
+| `DECISIONS_ACTIVITY` | `0` skips the working-agents scan in `count --badge` |
+| `CLAUDE_CONFIG_DIR`, `PI_SUB_DIR` | where the activity view reads Claude transcripts and pi subagent state |
 | `DECISIONS_SESSION` | a label added to the cards' "who asked" |
 | `DECISIONS_TELEGRAM_TOKEN` | the bot token itself (wins over `token_cmd`) |
 | `DECISIONS_TELEGRAM_TOKEN_CMD`, `DECISIONS_TELEGRAM_IDLE`, `DECISIONS_TELEGRAM_CONTEXT` | the `[telegram]` keys |
@@ -261,13 +279,14 @@ For scripts and agents without MCP:
 | `decisions list [--json]` | open decisions |
 | `decisions show ID` | the decision file |
 | `decisions stats [--days N] [--json]` | per-day counts and time to answer (median, p90) over the last N days (default 14) |
-| `decisions count [--badge]` | how many questions are open (`--badge`: `✋ N`, plus `✉ M` for answer cards) |
+| `decisions count [--badge]` | how many questions are open (`--badge`: `✋ N`, plus `✉ M` for answer cards, and `⟳ N` first while agents work) |
 | `decisions note --question Q [--key K] [--mr URL] [--source S]` | file an answer card (the answer on stdin); prints `D-<n>` |
 | `decisions seen ID` | mark an answer card read and file it under `done/<day>/` |
 | `decisions answer ID N [NOTE]` / `tell ID TEXT` / `ask ID TEXT` | answer, answer in your own words, ask back (a follow-up on an answer card) |
 | `decisions reply ID TEXT` / `withdraw ID [REASON]` / `close ID` | the asker's side |
 | `decisions wait ID [--timeout S]` | block until something happens (exit 0 answered or seen, 3 pending, 4 withdrawn, 5 asked back) |
 | `decisions sessions [--json]` | the running sessions a message can reach |
+| `decisions session-state --pid PID working\|idle` | a harness reports its session working or idle (exit 1 if none is registered for the pid) |
 | `decisions prompt SESSION TEXT` | message a running session (its name, directory or id); prints the card its reply lands on |
 | `decisions setup HARNESS` | how to connect a harness |
 

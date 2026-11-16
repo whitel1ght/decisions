@@ -217,6 +217,12 @@ colours and tachyonfx animations), with these changes:
 - An answer card shows `you asked: <question>`, the answer, and `⏎  Got it`; ⏎ throws it with
   the same undo window and marks it seen. Numbers, `a` and `n` only say so.
 
+## Activity
+
+The deck's `w` screen (`decisions --activity`), the header spinner and the badge's `⟳ N` segment
+show what every session is doing, so none sits idle unseen. Design and decisions (D-943..D-947):
+`docs/superpowers/specs/2026-11-16-activity-view-design.md`.
+
 ## `decisions setup <harness>`
 
 Prints, for `claude`, `codex`, `gemini`, `opencode`, `pi`, `cursor`, and `generic`:
