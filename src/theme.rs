@@ -53,6 +53,7 @@ pub struct Icons {
     pub star: &'static str,
     pub pen: &'static str,
     pub waiting: &'static str,
+    pub working: &'static str,
 }
 
 pub const TEXT_ICONS: Icons = Icons {
@@ -63,6 +64,7 @@ pub const TEXT_ICONS: Icons = Icons {
     star: "★",
     pen: "✎",
     waiting: "⧗",
+    working: "⟳",
 };
 
 pub const NERD_ICONS: Icons = Icons {
@@ -73,6 +75,7 @@ pub const NERD_ICONS: Icons = Icons {
     star: "\u{f005}",
     pen: "\u{f040}",
     waiting: "\u{f252}",
+    working: "\u{f110}",
 };
 
 impl Icons {

@@ -10,6 +10,7 @@ use ratatui::widgets::{
     Bar, BarChart, BarGroup, Block, BorderType, Clear, Padding, Paragraph, Sparkline, Wrap,
 };
 
+use crate::activity::{AgentActivity, Status};
 use crate::app::{FLIP_MS, InputKind, Pick, PromptLine, Side, State, UNDO_MS, age_label, band};
 use crate::edit;
 use crate::markdown;
@@ -58,6 +59,7 @@ const KEYS: &[(&str, &str)] = &[
     ("o", "open the link (MR, PR, ticket)"),
     ("r", "reload"),
     ("S", "stats: the last 14 days"),
+    ("w", "activity: what every session is doing"),
     (
         "in a text box",
         "←/→ cursor · ⌥←/→ word · ^a/^e ends · ^w word · ^u clear",
@@ -117,7 +119,9 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
         rows.height -= 1;
     }
     let (deck, bar) = split_prompt(s, rows.inner(Margin::new(1, 0)));
-    if let Some(st) = &s.stats {
+    if s.activity_open {
+        activity_screen(f, deck, s);
+    } else if let Some(st) = &s.stats {
         stats_screen(f, s, st, deck);
     } else if !s.loaded {
         if s.error.is_none() {
@@ -171,7 +175,7 @@ fn header(s: &State) -> String {
         0 => String::new(),
         n => format!("· {} {n} sent ", s.icons.waiting),
     };
-    match s.queue.len() {
+    let text = match s.queue.len() {
         _ if !s.loaded => format!(" {name} · loading… "),
         0 => format!(" {name} · nothing waiting {sent}"),
         _ => format!(
@@ -179,7 +183,32 @@ fn header(s: &State) -> String {
             counts.join(" · "),
             age_label(s.oldest_ms())
         ),
+    };
+    format!("{}{} ", text.trim_end(), activity_parts(s))
+}
+
+/// What the sessions are doing, after the deck's own counts and only when non-zero.
+fn activity_parts(s: &State) -> String {
+    let mut parts = String::new();
+    match s.activity.working() {
+        0 => {}
+        n => parts.push_str(&format!(" · {} {n} working", spinner(s.now))),
     }
+    match s.activity.waiting() {
+        0 => {}
+        n => parts.push_str(&format!(" · {} {n}", s.icons.hand)),
+    }
+    match s.activity.unknown() {
+        0 => {}
+        n => parts.push_str(&format!(" · ? {n}")),
+    }
+    parts
+}
+
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn spinner(now_ms: i64) -> &'static str {
+    SPINNER[(now_ms / 100).rem_euclid(10) as usize]
 }
 
 fn footer(s: &State) -> String {
@@ -192,6 +221,13 @@ fn footer(s: &State) -> String {
             Pick::Files { .. } => "type to search · ↑↓ pick · ⏎ or tab use it · esc keep typing",
         };
         return format!(" {keys} ");
+    }
+    if s.activity_open {
+        let enter = match s.activity.sessions.get(s.activity_cur) {
+            Some(row) if row.status == Status::Waiting && row.card.is_some() => "answer its card",
+            _ => "give it a task",
+        };
+        return format!(" j/k move · ⏎ {enter} · esc back ");
     }
     let keys = match (&s.input, s.help, s.side, &s.pending) {
         (Some(i), ..) => match &i.kind {
@@ -1064,6 +1100,188 @@ fn stats_screen(f: &mut Frame, s: &State, st: &Stats, area: Rect) {
     );
 }
 
+/// `14m`, `3h`: the largest whole unit, from seconds to days.
+fn duration_label(ms: i64) -> String {
+    let secs = (ms / 1000).max(0);
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
+}
+
+fn short_cwd(cwd: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match cwd.strip_prefix(home.as_str()) {
+        Some("") if !home.is_empty() => "~".into(),
+        Some(rest) if !home.is_empty() && rest.starts_with('/') => format!("~{rest}"),
+        _ => cwd.to_string(),
+    }
+}
+
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return format!("{text:<width$}");
+    }
+    let head: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+const NAME_W: usize = 22;
+const STATE_W: usize = 12;
+const CWD_W: usize = 22;
+
+fn state_word(status: Status) -> &'static str {
+    match status {
+        Status::Idle => "idle",
+        Status::Waiting => "waiting",
+        Status::Working => "working",
+        Status::Unknown => "unknown",
+    }
+}
+
+fn state_mark(s: &State, status: Status) -> String {
+    match status {
+        Status::Idle => "○".into(),
+        Status::Waiting => s.icons.hand.into(),
+        Status::Working => spinner(s.now).into(),
+        Status::Unknown => "?".into(),
+    }
+}
+
+/// One row: mark, name, state word and how long, directory, what it is doing.
+struct Row<'a> {
+    indent: bool,
+    name: &'a str,
+    name_color: Color,
+    status: Status,
+    since: Option<i64>,
+    cwd: &'a str,
+    doing: &'a str,
+}
+
+fn activity_row(s: &State, r: Row) -> Line<'static> {
+    let accent = r.status == Status::Idle;
+    let mark_color = match r.status {
+        Status::Idle => theme::LAVENDER,
+        Status::Waiting => theme::YELLOW,
+        Status::Working => theme::GREEN,
+        Status::Unknown => theme::MUTED,
+    };
+    let how_long = r.since.map_or(String::new(), |at| {
+        format!(" {}", duration_label(s.now - at))
+    });
+    let pad = if r.indent { "    └ " } else { "" };
+    let name_w = NAME_W.saturating_sub(pad.chars().count());
+    Line::from(vec![
+        Span::styled(pad, Style::new().fg(theme::MUTED)),
+        Span::styled(
+            format!("{} ", state_mark(s, r.status)),
+            Style::new().fg(mark_color),
+        ),
+        Span::styled(fit(r.name, name_w), Style::new().fg(r.name_color)),
+        Span::styled(
+            fit(&format!("{}{how_long}", state_word(r.status)), STATE_W),
+            Style::new().fg(if accent { theme::LAVENDER } else { theme::TEXT }),
+        ),
+        Span::styled(fit(r.cwd, CWD_W), Style::new().fg(theme::MUTED)),
+        Span::styled(r.doing.to_string(), Style::new().fg(theme::TEXT)),
+    ])
+}
+
+fn activity_screen(f: &mut Frame, area: Rect, s: &State) {
+    let a = &s.activity;
+    let refreshed = if a.at == 0 {
+        "loading…".to_string()
+    } else {
+        format!("refreshed {}s ago", ((s.now - a.at) / 1000).max(0))
+    };
+    let title = format!(
+        " activity · {} working · {} waiting on you · {} idle · {} unknown  {refreshed}",
+        a.working(),
+        a.waiting(),
+        a.idle(),
+        a.unknown(),
+    );
+    let mut lines = vec![
+        Line::styled(
+            title,
+            Style::new().fg(theme::BLUE).add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            "─".repeat(usize::from(area.width)),
+            Style::new().fg(theme::MUTED),
+        ),
+    ];
+    if a.sessions.is_empty() && a.others.is_empty() {
+        lines.push(Line::styled(
+            " no agent sessions running",
+            Style::new().fg(theme::MUTED),
+        ));
+    }
+    let agent_row = |ag: &AgentActivity, indent: bool| {
+        activity_row(
+            s,
+            Row {
+                indent,
+                name: &ag.label,
+                name_color: theme::TEXT,
+                status: ag.status,
+                since: ag.since,
+                cwd: "",
+                doing: ag.doing.as_ref().map_or("", |d| d.text.as_str()),
+            },
+        )
+    };
+    let mut cursor_line = 0;
+    for (i, row) in a.sessions.iter().enumerate() {
+        let name_color = s
+            .queue
+            .iter()
+            .find(|d| d.session == row.session.owner && !d.color.is_empty())
+            .and_then(|d| theme::session_color(&d.color))
+            .unwrap_or(theme::TEXT);
+        let doing = match (&row.status, &row.card) {
+            (Status::Waiting, Some(id)) => match s.queue.iter().find(|d| &d.id == id) {
+                Some(d) => format!("{id}: {}", d.question),
+                None => id.clone(),
+            },
+            _ => row.doing.as_ref().map_or(String::new(), |d| d.text.clone()),
+        };
+        let mut line = activity_row(
+            s,
+            Row {
+                indent: false,
+                name: row.session.label(),
+                name_color,
+                status: row.status,
+                since: row.since,
+                cwd: &short_cwd(&row.session.cwd),
+                doing: &doing,
+            },
+        );
+        if i == s.activity_cur {
+            cursor_line = lines.len();
+            line = line.style(Style::new().bg(theme::SELECT));
+        }
+        lines.push(line);
+        for ag in &row.agents {
+            lines.push(agent_row(ag, true));
+        }
+    }
+    if !a.others.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::styled(" other agents", Style::new().fg(theme::MUTED)));
+        for ag in &a.others {
+            lines.push(agent_row(ag, false));
+        }
+    }
+    let skip = (cursor_line + 1).saturating_sub(usize::from(area.height));
+    let shown: Vec<Line> = lines.into_iter().skip(skip).collect();
+    f.render_widget(Paragraph::new(shown), area);
+}
+
 fn help(f: &mut Frame, s: &State, area: Rect) {
     let icon = |t: &str| {
         t.replace("{star}", s.icons.star)
@@ -1102,8 +1320,10 @@ fn help(f: &mut Frame, s: &State, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::{Activity, Doing, SessionActivity};
     use crate::app::{self, Event, Key, State};
     use crate::queue::{Decision, decode};
+    use crate::sessions::Session;
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     const T0: i64 = 1_792_483_448_000;
@@ -1532,6 +1752,138 @@ mod tests {
         assert!(screen(&render(&s, 80, 24).0).contains("0, oldest -"));
     }
 
+    fn watching(list: Vec<Decision>) -> State {
+        let row = |owner: &str, name: &str, status, since, card: Option<&str>| SessionActivity {
+            session: Session {
+                owner: owner.into(),
+                name: name.into(),
+                cwd: "/work/x".into(),
+                ..Session::default()
+            },
+            status,
+            since: Some(since),
+            doing: Some(Doing {
+                text: "Bash: run tests".into(),
+                at: None,
+            }),
+            agents: Vec::new(),
+            card: card.map(String::from),
+        };
+        let mut s = state(list, T0);
+        let mut busy = row("o2", "ACME-1", Status::Working, T0 - 3 * MIN, None);
+        busy.agents.push(AgentActivity {
+            label: "Review colours".into(),
+            status: Status::Working,
+            since: Some(T0 - 40_000),
+            doing: None,
+        });
+        s.activity = Activity {
+            sessions: vec![
+                row("o1", "main", Status::Idle, T0 - 14 * MIN, None),
+                busy,
+                row(
+                    "o3",
+                    "the system",
+                    Status::Waiting,
+                    T0 - 6 * MIN,
+                    Some("D-1"),
+                ),
+            ],
+            others: Vec::new(),
+            at: T0 - 2000,
+        };
+        s.activity_open = true;
+        s
+    }
+
+    #[test]
+    fn header_shows_spinner_and_counts_only_when_nonzero() {
+        let mut s = watching(fixture());
+        s.activity_open = false;
+        s.now = T0 + 300;
+        let all = screen(&render(&s, 100, 24).0);
+        assert!(all.contains("⠸ 1 working"), "{all}");
+        assert!(all.contains("✋"), "{all}");
+        assert!(!all.contains("? 1"), "{all}");
+        s.activity.sessions.retain(|r| r.status == Status::Idle);
+        let all = screen(&render(&s, 100, 24).0);
+        assert!(!all.contains("working") && !all.contains("✋"), "{all}");
+    }
+
+    #[test]
+    fn activity_screen_lists_idle_first_with_agents_indented() {
+        let s = watching(fixture());
+        let (buf, _) = render(&s, 120, 24);
+        let all = screen(&buf);
+        assert!(
+            all.contains(
+                "activity · 1 working · 1 waiting on you · 1 idle · 0 unknown  refreshed 2s ago"
+            ),
+            "{all}"
+        );
+        assert!(all.contains("idle 14m"), "{all}");
+        assert!(all.contains("working 3m"), "{all}");
+        let (_, idle) = find(&buf, "main");
+        let (_, busy) = find(&buf, "ACME-1");
+        assert!(idle < busy, "{all}");
+        let (x, y) = find(&buf, "└");
+        assert_eq!(y, busy + 1, "{all}");
+        assert!(x > 3, "the agent is indented: {all}");
+        assert!(all.contains("Review colours"), "{all}");
+        assert!(
+            all.contains("j/k move · ⏎ give it a task · esc back"),
+            "{all}"
+        );
+        let (x, y) = find(&buf, "idle 14m");
+        assert_eq!(buf[(x, y)].fg, theme::LAVENDER);
+        let (x, y) = find(&buf, "working 3m");
+        assert_eq!(buf[(x, y)].fg, theme::TEXT);
+    }
+
+    #[test]
+    fn a_waiting_row_shows_its_card() {
+        let mut s = watching(fixture());
+        s.activity_cur = 2;
+        let (buf, _) = render(&s, 140, 24);
+        let all = screen(&buf);
+        assert!(
+            all.contains("D-1: Push the fix and post the reply?"),
+            "{all}"
+        );
+        assert!(all.contains("⏎ answer its card"), "{all}");
+    }
+
+    #[test]
+    fn an_empty_activity_says_so_and_a_never_scanned_one_says_loading() {
+        let mut s = watching(fixture());
+        s.activity = Default::default();
+        let all = screen(&render(&s, 100, 24).0);
+        assert!(all.contains("no agent sessions running"), "{all}");
+        assert!(all.contains("loading…"), "{all}");
+    }
+
+    #[test]
+    fn a_session_with_a_card_colour_wears_it() {
+        let mut list = fixture();
+        list[0].session = "o1".into();
+        list[0].color = "green".into();
+        let s = watching(list);
+        let (buf, _) = render(&s, 120, 24);
+        let (x, y) = find(&buf, "main");
+        assert_eq!(buf[(x, y)].fg, theme::GREEN);
+        let (x, y) = find(&buf, "ACME-1");
+        assert_eq!(buf[(x, y)].fg, theme::TEXT);
+    }
+
+    #[test]
+    fn durations_use_the_largest_whole_unit() {
+        let s = |n: i64| duration_label(n * 1000);
+        assert_eq!(
+            [s(0), s(59), s(60), s(3599), s(3600), s(86399), s(86400)],
+            ["0s", "59s", "1m", "59m", "1h", "23h", "1d"]
+        );
+    }
+
     #[test]
     fn help_lists_the_keys() {
         let mut s = state(fixture(), T0);
@@ -1541,7 +1893,8 @@ mod tests {
             all.contains("undo the last answer")
                 && all.contains("ask the session back")
                 && all.contains("a on ✉")
-                && all.contains("message the session that wrote it"),
+                && all.contains("message the session that wrote it")
+                && all.contains("what every session is doing"),
             "{all}"
         );
     }
