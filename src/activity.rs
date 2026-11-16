@@ -192,7 +192,7 @@ pub fn scan(
         let status = classify(&Signals {
             reported: &s.state,
             card: card.is_some(),
-            background_jobs: transcript::open_background(&records),
+            background_jobs: transcript::open_background(&records, now),
             agents: &agent_list,
         });
         let own_since = (s.since > 0).then_some(s.since);

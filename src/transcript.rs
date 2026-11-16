@@ -1,4 +1,5 @@
 use crate::activity::Doing;
+use crate::agents::AGENT_GONE;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs::File;
@@ -190,31 +191,58 @@ fn result_texts(record: &Value) -> Vec<&str> {
     out
 }
 
+/// Where a `<task-notification>` arrives: a user prompt, a queue operation, or a queued command
+/// attached to the turn.
+fn notice_text(record: &Value) -> Option<&str> {
+    match kind(record)? {
+        "user" => record.pointer("/message/content")?.as_str(),
+        "queue-operation" => record.get("content")?.as_str(),
+        "attachment" => {
+            let attachment = record.get("attachment")?;
+            if attachment.get("type")?.as_str()? != "queued_command" {
+                return None;
+            }
+            attachment.get("prompt")?.as_str()
+        }
+        _ => None,
+    }
+}
+
+fn tag<'a>(block: &'a str, name: &str) -> Option<&'a str> {
+    let open = format!("<{name}>");
+    let at = block.find(&open)?;
+    Some(word(&block[at + open.len()..]))
+}
+
+/// Ids whose notification, read only up to its own closing tag, reports an end.
 fn finished_ids<'a>(text: &'a str, out: &mut HashSet<&'a str>) {
-    for (i, _) in text.match_indices("<task-id>") {
-        let rest = &text[i + "<task-id>".len()..];
-        let id = word(rest);
-        let Some(status) = rest.find("<status>") else {
+    for block in text.split("<task-notification>").skip(1) {
+        let block = block
+            .split_once("</task-notification>")
+            .map_or(block, |(b, _)| b);
+        let (Some(id), Some(status)) = (tag(block, "task-id"), tag(block, "status")) else {
             continue;
         };
-        let status = word(&rest[status + "<status>".len()..]);
         if !id.is_empty() && matches!(status, "completed" | "failed" | "killed" | "stopped") {
             out.insert(id);
         }
     }
 }
 
-/// Background jobs started in the window and not yet reported finished.
-pub fn open_background(records: &[Value]) -> usize {
+/// Background jobs started in the window and not yet reported finished. A start older than
+/// `AGENT_GONE` is left out: a job a restart killed never reports.
+pub fn open_background(records: &[Value], now: i64) -> usize {
     let (mut started, mut finished) = (HashSet::new(), HashSet::new());
-    for record in records.iter().filter(|r| kind(r) == Some("user")) {
-        if let Some(s) = record.pointer("/message/content").and_then(Value::as_str) {
-            finished_ids(s, &mut finished);
+    for record in records {
+        if let Some(text) = notice_text(record) {
+            finished_ids(text, &mut finished);
+        }
+        if kind(record) != Some("user") || at(record).is_some_and(|t| now - t > AGENT_GONE) {
+            continue;
         }
         for text in result_texts(record) {
             ids_after(text, "moved to the background as ", "task ", &mut started);
             ids_after(text, "running in background with ID: ", "", &mut started);
-            ids_after(text, "agentId: ", "", &mut started);
         }
     }
     started.difference(&finished).count()
@@ -264,6 +292,7 @@ mod tests {
     const T1: &str = "2026-11-05T21:09:59.727Z";
     const T1_MS: i64 = 1_793_912_999_727;
     const T2: &str = "2026-11-05T21:10:30.000Z";
+    const NOW: i64 = T1_MS + 60_000;
 
     #[test]
     fn doing_names_the_last_tool_call() {
@@ -323,7 +352,73 @@ mod tests {
                 ),
             ),
         ];
-        assert_eq!(open_background(&records), 1);
+        assert_eq!(open_background(&records, NOW), 1);
+    }
+
+    fn notice(id: &str, status: &str) -> String {
+        format!(
+            "<task-notification>\n<task-id>{id}</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n\
+             <status>{status}</status>\n<summary>a job ended</summary>\n</task-notification>"
+        )
+    }
+
+    fn queue_operation(ts: &str, content: &str) -> Value {
+        json!({"type":"queue-operation","operation":"enqueue","timestamp":ts,"sessionId":"s","content":content})
+    }
+
+    fn queued_command(ts: &str, prompt: &str) -> Value {
+        json!({"type":"attachment","timestamp":ts,"sessionId":"s",
+               "attachment":{"type":"queued_command","prompt":prompt}})
+    }
+
+    #[test]
+    fn a_queue_operation_notice_finishes_a_job() {
+        let records = vec![
+            tool_result(T1, "Command running; moved to the background as task k1"),
+            queue_operation(T2, &notice("k1", "completed")),
+        ];
+        assert_eq!(open_background(&records, NOW), 0);
+    }
+
+    #[test]
+    fn a_queued_command_attachment_finishes_a_job() {
+        let records = vec![
+            tool_result(T1, "running in background with ID: b2"),
+            queued_command(T2, &notice("b2", "killed")),
+        ];
+        assert_eq!(open_background(&records, NOW), 0);
+        let other = json!({"type":"attachment","timestamp":T2,
+                           "attachment":{"type":"note","prompt":notice("b2", "completed")}});
+        let records = vec![tool_result(T1, "running in background with ID: b2"), other];
+        assert_eq!(open_background(&records, NOW), 1, "only a queued command");
+    }
+
+    #[test]
+    fn a_status_in_a_later_notice_does_not_finish_an_earlier_job() {
+        let event = "<task-notification><task-id>m1</task-id><summary>a line</summary>\
+                     <event>out</event></task-notification>";
+        let records = vec![
+            tool_result(T1, "running in background with ID: m1"),
+            tool_result(T1, "running in background with ID: b2"),
+            queue_operation(T2, &format!("{event}\n{}", notice("b2", "completed"))),
+        ];
+        assert_eq!(open_background(&records, NOW), 1);
+    }
+
+    #[test]
+    fn a_start_older_than_agent_gone_is_not_counted() {
+        let records = vec![tool_result(
+            T1,
+            "Command running; moved to the background as task k1",
+        )];
+        assert_eq!(open_background(&records, T1_MS + AGENT_GONE - 1), 1);
+        assert_eq!(open_background(&records, T1_MS + AGENT_GONE + 1), 0);
+    }
+
+    #[test]
+    fn a_subagent_id_is_not_a_background_job() {
+        let records = vec![tool_result(T1, "Async agent launched.\nagentId: a1b2")];
+        assert_eq!(open_background(&records, NOW), 0);
     }
 
     #[test]
