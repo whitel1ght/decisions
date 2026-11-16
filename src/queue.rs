@@ -25,7 +25,7 @@ pub struct Entry {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct Decision {
     pub id: String,
     #[serde(default)]

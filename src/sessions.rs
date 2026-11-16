@@ -33,6 +33,9 @@ pub struct Session {
     /// Its id now, from Claude Code's list: `/clear` changes it, and `owner` stays.
     #[serde(default, skip_serializing)]
     pub current: String,
+    /// Epoch ms the session started its current state; set by harnesses that report it (pi).
+    #[serde(default)]
+    pub since: i64,
 }
 
 impl Session {
@@ -52,7 +55,7 @@ impl Session {
             .unwrap_or(&self.cwd)
     }
 
-    fn is_claude(&self) -> bool {
+    pub(crate) fn is_claude(&self) -> bool {
         self.client.contains("claude")
     }
 }
