@@ -20,5 +20,6 @@ pub mod stats;
 pub mod store;
 pub mod telegram;
 pub mod theme;
+pub mod transcript;
 pub mod tui;
 pub mod ui;
