@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::store::write_atomic;
 
 const AGENTS_WITHIN: Duration = Duration::from_secs(3);
+const TTY_WITHIN: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -196,14 +197,25 @@ fn state_label(a: &Agent) -> String {
 /// that could be read is a headless run (`claude -p`), which nobody can talk to: it is left out.
 /// A session on the list with no registration, whose MCP server is older than the registry, joins
 /// under its current id, which its harness side matches.
-pub fn merge(mut list: Vec<Session>, agents: Option<&[Agent]>) -> Vec<Session> {
+pub fn merge(list: Vec<Session>, agents: Option<&[Agent]>) -> Vec<Session> {
+    merge_keeping(list, agents, |_| false)
+}
+
+/// `merge`, but a registered Claude session missing from the list stays, with no state, when
+/// `keep` says so.
+fn merge_keeping(
+    mut list: Vec<Session>,
+    agents: Option<&[Agent]>,
+    keep: impl Fn(&Session) -> bool,
+) -> Vec<Session> {
     if let Some(agents) = agents {
         list.retain_mut(|s| {
             if !s.is_claude() {
                 return true;
             }
             let Some(a) = agents.iter().find(|a| a.pid == s.pid) else {
-                return false;
+                s.state.clear();
+                return keep(s);
             };
             if !a.name.is_empty() {
                 s.name = a.name.clone();
@@ -267,6 +279,24 @@ fn claude_agents() -> Option<Vec<Agent>> {
 /// The sessions a prompt can reach now.
 pub fn running(dir: &Path) -> Vec<Session> {
     merge(registered(dir), claude_agents().as_deref())
+}
+
+/// The sessions the activity screen shows: `running`, plus a registered Claude session that
+/// Claude's list leaves out while its process has a terminal. That is an interactive session
+/// the list missed; a headless run has none and stays hidden.
+pub fn active(dir: &Path) -> Vec<Session> {
+    merge_keeping(registered(dir), claude_agents().as_deref(), |s| {
+        has_tty(s.pid)
+    })
+}
+
+fn has_tty(pid: u32) -> bool {
+    let mut command = Command::new("ps");
+    command.args(["-o", "tty=", "-p", &pid.to_string()]);
+    output_within(command, TTY_WITHIN).is_some_and(|out| {
+        let tty = String::from_utf8_lossy(&out);
+        !matches!(tty.trim(), "" | "?" | "??")
+    })
 }
 
 /// The session `query` names: its owner id, its name, or the only one whose name or directory
@@ -498,6 +528,35 @@ mod tests {
         let got = merge(list, Some(&agents));
         let rows: Vec<_> = got.iter().map(|s| (s.label(), s.state.as_str())).collect();
         assert_eq!(rows, [("backend", ""), ("the system", "idle")]);
+    }
+
+    #[test]
+    fn the_activity_list_keeps_a_missing_claude_session_with_a_terminal() {
+        let mut interactive = session("c2", 11, "claude-code", "/x/interactive");
+        interactive.state = "working".into();
+        let list = vec![
+            session("c1", 10, "claude-code", "/x/dotfiles"),
+            interactive,
+            session("c3", 12, "claude-code", "/x/headless"),
+        ];
+        let agents = [Agent {
+            pid: 10,
+            status: "idle".into(),
+            ..Agent::default()
+        }];
+        let got = merge_keeping(list.clone(), Some(&agents), |s| s.pid == 11);
+        let rows: Vec<_> = got.iter().map(|s| (s.label(), s.state.as_str())).collect();
+        assert_eq!(rows, [("dotfiles", "idle"), ("interactive", "")]);
+        assert_eq!(
+            merge(list, Some(&agents)).len(),
+            1,
+            "the prompt line hides it"
+        );
+    }
+
+    #[test]
+    fn a_process_that_is_gone_has_no_terminal() {
+        assert!(!has_tty(4_000_002));
     }
 
     #[test]

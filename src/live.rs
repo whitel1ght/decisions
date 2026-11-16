@@ -69,7 +69,7 @@ impl Backend for Live {
             .map_or(0, |d| d.as_millis() as i64);
         Ok(activity::scan(
             &Sources::from_env(),
-            sessions::running(&self.dir),
+            sessions::active(&self.dir),
             &self.store.list().0,
             now,
             detail,
