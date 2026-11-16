@@ -377,12 +377,7 @@ pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
         Event::Loaded(Err(e)) => s.error = Some(e),
         Event::StatsLoaded(Ok(st)) => s.stats = Some(*st),
         Event::StatsLoaded(Err(e)) => s.toast(format!("stats failed: {e}")),
-        Event::ActivityLoaded(Ok(a)) => {
-            s.activity = *a;
-            s.activity_cur = s
-                .activity_cur
-                .min(s.activity.sessions.len().saturating_sub(1));
-        }
+        Event::ActivityLoaded(Ok(a)) => activity_loaded(s, *a),
         Event::ActivityLoaded(Err(_)) => {}
         Event::Sent { id, ask, result } => sent(s, id, ask, result, &mut out),
         Event::Paste(text) => paste(s, text, &mut out),
@@ -408,6 +403,20 @@ pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
         Event::Key(k) => key(s, k, &mut out),
     }
     out
+}
+
+/// A scan re-sorts the rows: the cursor stays on the session it was on while that one runs.
+fn activity_loaded(s: &mut State, activity: Activity) {
+    let selected = s
+        .activity
+        .sessions
+        .get(s.activity_cur)
+        .map(|r| r.session.owner.clone());
+    s.activity = activity;
+    let rows = &s.activity.sessions;
+    s.activity_cur = selected
+        .and_then(|owner| rows.iter().position(|r| r.session.owner == owner))
+        .unwrap_or(s.activity_cur.min(rows.len().saturating_sub(1)));
 }
 
 fn tick(s: &mut State, out: &mut Vec<Command>) {
@@ -1765,6 +1774,25 @@ mod tests {
         update(&mut s, Event::ActivityLoaded(Ok(Box::new(shorter))), T0);
         assert_eq!(s.activity_cur, 0);
         assert!(!s.spinning());
+    }
+
+    #[test]
+    fn the_cursor_follows_its_session_when_a_scan_reorders_the_rows() {
+        let mut s = watching();
+        press(&mut s, Key::Char('j'));
+        let reordered = Activity {
+            sessions: vec![
+                row("o4", "ACME-3", Status::Idle, None),
+                row("o1", "main", Status::Idle, None),
+                row("o3", "ACME-2", Status::Waiting, None),
+                row("o2", "ACME-1", Status::Working, None),
+            ],
+            ..Activity::default()
+        };
+        update(&mut s, Event::ActivityLoaded(Ok(Box::new(reordered))), T0);
+        assert_eq!(s.activity_cur, 3);
+        assert_eq!(press(&mut s, Key::Enter), [Command::LoadSessions]);
+        assert_eq!(s.prompt.target.as_deref(), Some("o2"));
     }
 
     #[test]
