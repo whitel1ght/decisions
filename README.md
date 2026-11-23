@@ -116,8 +116,12 @@ A reply on a card you already marked seen brings the card back too.
 `Tab` in the deck (or `decisions --prompt` to open with it) brings up a prompt line under the
 cards: pick a running session, type, `⏎`. No card sits in your way while the session works: the
 header counts the message (`⧗ 1 sent`) and the reply lands on a card of its own, so you never
-switch to the session or scroll through its output. `Esc` closes the line and keeps your draft
-while the deck stays open.
+switch to the session or scroll through its output. `Esc` hands the keys back to the cards and
+keeps your draft in sight under them, dimmed, for as long as the deck stays open; `Tab` returns
+to it. `⇧Tab` goes either way. While the line has the keys, an answer card's `⏎ Got it` is dimmed,
+since `⏎` sends the message. When a card comes in while you type, the line's border turns yellow
+(`new card ↑ ⇧tab`), and a `⏎` pressed straight after asks once (`⏎ again sends`) instead of
+sending a half-written message you meant as the card's "got it".
 
 - **Pick the session:** `#` as the first character, or `Tab` again, lists the running sessions with
   their harness, directory and state; type to filter, `1-9` or `⏎` to pick. The last one is
@@ -179,6 +183,7 @@ and pi's subagent state are read from.
 | `S` | stats screen: answered and withdrawn per day, median time to answer, summary (esc or `S` returns) |
 | `w` | activity screen: what every session is doing (esc, `w` or `q` returns) |
 | `Tab` | the prompt line: message a running session (`@` file, `#` session, `^v` image) |
+| `⇧Tab` | move the keys between the prompt line and the cards |
 | `?` | all the keys |
 | `q / esc` | send pending answers and close |
 

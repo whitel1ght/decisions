@@ -35,6 +35,8 @@ pub enum Key {
     Space,
     Backspace,
     Tab,
+    /// Shift+Tab: the keys go between the prompt line and the cards.
+    BackTab,
     CtrlD,
     CtrlU,
     CtrlV,
@@ -229,9 +231,16 @@ pub struct PromptLine {
     /// Messages that failed as the deck closed, with why: reported on the way out.
     pub lost: Vec<(String, String)>,
     pub loaded_at: i64,
+    /// A card came in while the line had the keys and a draft: the next key, if it is ⏎, may
+    /// have been meant for the card, so it asks once before sending.
+    pub held: bool,
 }
 
 impl PromptLine {
+    pub fn has_draft(&self) -> bool {
+        !self.text.is_empty() || !self.images.is_empty()
+    }
+
     pub fn target_session(&self) -> Option<&Session> {
         let target = self.target.as_ref()?;
         self.sessions.iter().find(|s| &s.owner == target)
@@ -501,6 +510,7 @@ fn loaded(s: &mut State, list: Vec<Decision>) {
     } else {
         for id in ids.iter().filter(|id| !before.contains(id)) {
             s.anims.push(Anim::Arrive(id.clone()));
+            s.prompt.held |= s.prompt.open && s.prompt.has_draft();
         }
         if let Some(gone) = cur_id.as_ref().filter(|c| !ids.contains(c)) {
             s.anims.push(Anim::Leave(gone.clone()));
@@ -522,10 +532,16 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
     if k == Key::Interrupt {
         return quit(s, out);
     }
+    if s.prompt.open && k == Key::BackTab {
+        s.prompt.open = false;
+        s.prompt.held = false;
+        s.prompt.pick = Pick::None;
+        return;
+    }
     if s.prompt.open {
         return prompt_key(s, k, out);
     }
-    if k == Key::Tab && !s.help && s.stats.is_none() && !s.activity_open {
+    if matches!(k, Key::Tab | Key::BackTab) && !s.help && s.stats.is_none() && !s.activity_open {
         return message_session(s, out);
     }
     if s.input.is_some() {
@@ -907,6 +923,7 @@ fn message_session(s: &mut State, out: &mut Vec<Command>) {
 /// Tab, or `decisions --prompt`: the prompt line opens with its draft and its last session.
 pub fn open_prompt(s: &mut State, out: &mut Vec<Command>) {
     s.prompt.open = true;
+    s.prompt.held = false;
     s.prompt.pick = Pick::None;
     s.prompt.loaded_at = s.now;
     out.push(Command::LoadSessions);
@@ -971,6 +988,9 @@ fn choose_session(s: &mut State, owner: String, out: &mut Vec<Command>) {
 }
 
 fn prompt_key(s: &mut State, k: Key, out: &mut Vec<Command>) {
+    if std::mem::take(&mut s.prompt.held) && k == Key::Enter && s.prompt.pick == Pick::None {
+        return s.toast("a card just came in: ⏎ again sends · esc or ⇧tab goes to it".into());
+    }
     match s.prompt.pick.clone() {
         Pick::None => prompt_text_key(s, k, out),
         Pick::Sessions { query, sel } => session_pick_key(s, k, query, sel, out),
@@ -2586,6 +2606,85 @@ mod tests {
         press(&mut s, Key::Tab);
         assert_eq!(s.prompt.text, "half a thought");
         assert_eq!(s.prompt.images.len(), 1);
+    }
+
+    #[test]
+    fn shift_tab_moves_between_the_prompt_line_and_the_cards() {
+        let mut s = prompting();
+        type_in(&mut s, "half a thought");
+        press(&mut s, Key::BackTab);
+        assert!(!s.prompt.open, "the cards have the keys");
+        assert_eq!(s.prompt.text, "half a thought");
+        press(&mut s, Key::Char('j'));
+        assert_eq!(s.prompt.text, "half a thought", "j moved on the card");
+        assert_eq!(press(&mut s, Key::BackTab), [Command::LoadSessions]);
+        assert!(s.prompt.open);
+        s.prompt.pick = Pick::Sessions {
+            query: String::new(),
+            sel: 0,
+        };
+        press(&mut s, Key::BackTab);
+        assert!(!s.prompt.open && s.prompt.pick == Pick::None);
+    }
+
+    #[test]
+    fn a_hold_ends_when_the_keys_go_to_the_cards() {
+        let mut s = typing_on_an_empty_deck();
+        update(&mut s, Event::Loaded(Ok(vec![answer_card("D-5")])), T0);
+        press(&mut s, Key::BackTab);
+        press(&mut s, Key::BackTab);
+        assert!(sends(&press(&mut s, Key::Enter)));
+    }
+
+    fn typing_on_an_empty_deck() -> State {
+        let mut s = loaded(vec![]);
+        press(&mut s, Key::Tab);
+        sessions_arrive(&mut s);
+        type_in(&mut s, "fix the");
+        s
+    }
+
+    fn sends(out: &[Command]) -> bool {
+        out.iter().any(|c| matches!(c, Command::SendPrompt { .. }))
+    }
+
+    #[test]
+    fn a_card_arriving_while_typing_holds_the_next_enter() {
+        let mut s = typing_on_an_empty_deck();
+        update(&mut s, Event::Loaded(Ok(vec![answer_card("D-5")])), T0);
+        assert!(!sends(&press(&mut s, Key::Enter)), "meant for the card");
+        assert!(s.prompt.open && s.prompt.text == "fix the");
+        assert!(s.toast.as_ref().unwrap().0.contains("⏎ again sends"));
+        assert!(sends(&press(&mut s, Key::Enter)));
+    }
+
+    #[test]
+    fn esc_after_a_card_arrives_lands_on_it_with_the_draft_kept() {
+        let mut s = typing_on_an_empty_deck();
+        update(&mut s, Event::Loaded(Ok(vec![answer_card("D-5")])), T0);
+        press(&mut s, Key::Enter);
+        press(&mut s, Key::Esc);
+        press(&mut s, Key::Enter);
+        assert!(s.pending.is_some(), "got it on D-5");
+        assert_eq!(s.prompt.text, "fix the");
+    }
+
+    #[test]
+    fn typing_after_a_card_arrives_lifts_the_hold() {
+        let mut s = typing_on_an_empty_deck();
+        update(&mut s, Event::Loaded(Ok(vec![answer_card("D-5")])), T0);
+        type_in(&mut s, " test");
+        assert!(sends(&press(&mut s, Key::Enter)));
+    }
+
+    #[test]
+    fn a_reload_with_no_new_card_holds_nothing() {
+        let mut s = loaded(vec![answer_card("D-5")]);
+        press(&mut s, Key::Tab);
+        sessions_arrive(&mut s);
+        type_in(&mut s, "fix the test");
+        update(&mut s, Event::Loaded(Ok(vec![answer_card("D-5")])), T0);
+        assert!(sends(&press(&mut s, Key::Enter)));
     }
 
     fn sessions_arrive(s: &mut State) {

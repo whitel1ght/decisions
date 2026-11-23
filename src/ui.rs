@@ -55,6 +55,7 @@ const KEYS: &[(&str, &str)] = &[
         "tab",
         "message a running session; @ file, # session, ^v image",
     ),
+    ("⇧tab", "keys to the prompt line or back to the cards"),
     ("s", "skip to the end of the stack"),
     ("o", "open the link (MR, PR, ticket)"),
     ("r", "reload"),
@@ -142,8 +143,10 @@ pub fn draw(f: &mut Frame, s: &State) -> Drawn {
     } else {
         deck_draw(f, s, deck, &mut drawn);
     }
-    if s.prompt.open {
+    if s.prompt.open || s.prompt.has_draft() {
         prompt_bar(f, s, bar);
+    }
+    if s.prompt.open {
         prompt_pick(f, s, bar, deck);
     }
     if s.help {
@@ -220,9 +223,7 @@ fn spinner(now_ms: i64) -> &'static str {
 fn footer(s: &State) -> String {
     if s.prompt.open {
         let keys = match s.prompt.pick {
-            Pick::None => {
-                "⏎ send · ^v paste image · @ file · # or tab session · esc close, keeps draft"
-            }
+            Pick::None => "⏎ send · ^v paste image · @ file · # or tab session · esc or ⇧tab cards",
             Pick::Sessions { .. } => "1-9 or type a name · ↑↓ pick · ⏎ use this session · esc back",
             Pick::Files { .. } => "type to search · ↑↓ pick · ⏎ or tab use it · esc keep typing",
         };
@@ -255,6 +256,12 @@ fn footer(s: &State) -> String {
             "J/K cards · j/k options · 1-9 answer · ⏎ pick · space flip · ? help · tab prompt"
         }
     };
+    if s.prompt.has_draft() {
+        let keys = keys
+            .replace("tab message its session", "tab back to draft")
+            .replace("tab prompt", "tab back to draft");
+        return format!(" {keys} ");
+    }
     format!(" {keys} ")
 }
 
@@ -492,6 +499,7 @@ fn prompt_text(s: &State, to_cursor: bool) -> Paragraph<'static> {
             Span::styled(format!("#{query}"), Style::new().fg(theme::BLUE)),
             Span::styled("▏", Style::new().fg(theme::LAVENDER)),
         ]),
+        _ if !p.open => first.push(Span::styled(p.text.clone(), Style::new().fg(theme::MUTED))),
         _ => {
             let (all, head) = with_cursor(&p.text, p.back);
             first.extend(if to_cursor { head } else { all });
@@ -521,9 +529,10 @@ fn size_label(bytes: u64) -> String {
     }
 }
 
-/// Splits `area` into the deck and, while the prompt line is open, the line's box at its bottom.
+/// Splits `area` into the deck and, while the prompt line is open or holds a draft, the line's
+/// box at its bottom.
 fn split_prompt(s: &State, area: Rect) -> (Rect, Rect) {
-    if !s.prompt.open {
+    if !s.prompt.open && !s.prompt.has_draft() {
         return (area, Rect { height: 0, ..area });
     }
     let rows = prompt_text(s, false).line_count(area.width.saturating_sub(4)) as u16;
@@ -554,14 +563,18 @@ fn prompt_bar(f: &mut Frame, s: &State, rect: Rect) {
     } else {
         prompt_text(s, true).line_count(rect.width.saturating_sub(4))
     } as u16;
+    // The keys go to the line or to the cards; the line shows which, and that a card came in.
+    let (color, title) = match (s.prompt.open, s.prompt.held) {
+        (false, _) => (theme::MUTED, " prompt · tab to type "),
+        (true, true) => (theme::YELLOW, " prompt · new card ↑ ⇧tab "),
+        (true, false) => (theme::LAVENDER, " prompt "),
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::LAVENDER))
+        .border_style(Style::new().fg(color))
         .title(Span::styled(
-            " prompt ",
-            Style::new()
-                .fg(theme::LAVENDER)
-                .add_modifier(Modifier::BOLD),
+            title,
+            Style::new().fg(color).add_modifier(Modifier::BOLD),
         ))
         .padding(Padding::horizontal(1))
         .style(Style::new().bg(theme::BG));
@@ -826,9 +839,16 @@ fn answer_front(f: &mut Frame, s: &State, d: &Decision, rect: Rect, block: Block
     }
     let mut tail = vec![
         Line::default(),
+        // While the prompt line has the keys, ⏎ sends the message instead.
         Line::styled(
             "⏎  Got it",
-            Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(if s.prompt.open {
+                    theme::MUTED
+                } else {
+                    theme::GREEN
+                })
+                .add_modifier(Modifier::BOLD),
         ),
     ];
     let (body, field) = split_input(s, block.inner(rect));
@@ -2297,6 +2317,35 @@ mod tests {
         let all = screen(&buf);
         assert!(all.contains("tab prompt"), "{all}");
         assert!(!all.contains("╭ prompt"), "{all}");
+    }
+
+    #[test]
+    fn a_draft_stays_in_sight_while_the_cards_have_the_keys() {
+        let mut s = prompting();
+        s.prompt.text = "half a thought".into();
+        s.prompt.open = false;
+        let (buf, _) = render(&s, 110, 24);
+        let all = screen(&buf);
+        assert!(all.contains("half a thought"), "{all}");
+        assert!(all.contains("prompt · tab to type"), "{all}");
+        assert!(all.contains("tab back to draft"), "{all}");
+        assert!(!all.contains("▏"), "no cursor while unfocused:\n{all}");
+    }
+
+    #[test]
+    fn the_focused_line_says_how_to_reach_the_cards_and_dims_got_it() {
+        let mut s = state(vec![answer_card()], T0);
+        s.prompt.open = true;
+        s.prompt.sessions = sessions();
+        s.prompt.target = Some("o1".into());
+        s.prompt.text = "fix the".into();
+        s.prompt.held = true;
+        let (buf, _) = render(&s, 110, 24);
+        let all = screen(&buf);
+        assert!(all.contains("esc or ⇧tab cards"), "{all}");
+        assert!(all.contains("new card ↑ ⇧tab"), "{all}");
+        let (x, y) = find(&buf, "⏎  Got it");
+        assert_eq!(buf[(x, y)].fg, theme::MUTED);
     }
 
     #[test]
