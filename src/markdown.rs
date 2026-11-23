@@ -3,7 +3,7 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme;
 
@@ -19,10 +19,7 @@ pub fn render(text: &str, width: u16) -> Vec<Line<'static>> {
             continue;
         }
         if fenced {
-            out.push(Line::styled(
-                format!("  {line}"),
-                Style::new().fg(theme::CODE),
-            ));
+            out.extend(code_rows(line, width));
             continue;
         }
         if line.is_empty() {
@@ -43,6 +40,28 @@ pub fn render(text: &str, width: u16) -> Vec<Line<'static>> {
         out.extend(wrap(prefix, inline(body, style), width));
     }
     out
+}
+
+/// A code line split by display width, never at spaces only, so a command is never clipped;
+/// rows after the first start with `↪ ` so they read as one line.
+fn code_rows(line: &str, width: usize) -> Vec<Line<'static>> {
+    const FIRST: &str = "  ";
+    const NEXT: &str = "  ↪ ";
+    let style = Style::new().fg(theme::CODE);
+    let mut rows = Vec::new();
+    let (mut prefix, mut cur, mut used) = (FIRST, String::new(), 0);
+    for c in line.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        let room = width.saturating_sub(prefix.width()).max(1);
+        if used + w > room && !cur.is_empty() {
+            rows.push(Line::styled(format!("{prefix}{cur}"), style));
+            (prefix, cur, used) = (NEXT, String::new(), 0);
+        }
+        cur.push(c);
+        used += w;
+    }
+    rows.push(Line::styled(format!("{prefix}{cur}"), style));
+    rows
 }
 
 fn heading(line: &str) -> Option<&str> {
@@ -169,6 +188,36 @@ mod tests {
         let l = render("```\nlet x = 1;\n```", 40);
         assert_eq!(plain(&l), ["  let x = 1;"]);
         assert_eq!(l[0].style.fg, Some(theme::CODE));
+    }
+
+    #[test]
+    fn long_fenced_lines_wrap_with_a_marker() {
+        let cmd = "kubectl --context prod01 -n ecfx exec deploy/ecfx-admin -- python3 -c 'x'";
+        let l = plain(&render(&format!("```\n{cmd}\n```"), 30));
+        assert!(l.len() > 1, "{l:?}");
+        assert!(l[0].starts_with("  ") && !l[0].starts_with("  ↪"));
+        assert!(l[1..].iter().all(|r| r.starts_with("  ↪ ")), "{l:?}");
+        assert!(l.iter().all(|r| r.width() <= 30), "{l:?}");
+        let joined: String = l
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                if i == 0 {
+                    &r[2..]
+                } else {
+                    &r["  ↪ ".len()..]
+                }
+            })
+            .collect();
+        assert_eq!(joined, cmd);
+    }
+
+    #[test]
+    fn long_fenced_word_wraps_by_character() {
+        let token = "a".repeat(60);
+        let l = plain(&render(&format!("```\n{token}\n```"), 30));
+        assert_eq!(l.len(), 3, "{l:?}");
+        assert!(l.iter().all(|r| r.width() <= 30), "{l:?}");
     }
 
     #[test]

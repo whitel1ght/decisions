@@ -3,6 +3,7 @@ pub mod agents;
 pub mod app;
 pub mod cli;
 pub mod colors;
+pub mod commands;
 pub mod config;
 pub mod demo;
 pub mod edit;
