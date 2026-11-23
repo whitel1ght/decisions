@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::activity::{Activity, Status};
+use crate::commands::commands;
 use crate::edit::{self, Edit};
 use crate::prompt::{self, Image};
 use crate::queue::Decision;
@@ -77,6 +78,8 @@ pub enum Event {
         files: Vec<String>,
     },
     ImagePasted(Result<Image, String>),
+    /// The clipboard took a card's command, or why it did not.
+    Copied(Result<(), String>),
     /// A message from the prompt line went out; the card it opened, or why it did not.
     PromptSent(Result<String, String>),
 }
@@ -120,6 +123,8 @@ pub enum Command {
         text: String,
     },
     OpenUrl(String),
+    /// `c`: a card's command to the clipboard.
+    Copy(String),
     Quit,
 }
 
@@ -303,6 +308,8 @@ pub struct State {
     pub activity_asked: i64,
     pub error: Option<String>,
     pub toast: Option<(String, i64)>,
+    /// The card `c` last copied from and which of its commands, so the next `c` takes the next.
+    pub copy_at: Option<(String, usize)>,
     pub ghost: Option<(Decision, i64)>,
     pub flip: Option<i64>,
     pub anims: Vec<Anim>,
@@ -403,6 +410,8 @@ pub fn update(s: &mut State, ev: Event, now: i64) -> Vec<Command> {
         }
         Event::ImagePasted(Ok(image)) => s.prompt.images.push(image),
         Event::ImagePasted(Err(e)) => s.toast(e),
+        Event::Copied(Ok(())) => {}
+        Event::Copied(Err(e)) => s.toast(format!("copy failed: {e}")),
         Event::PromptSent(result) => prompt_sent(s, result),
         Event::Signal => {
             send_pending(s, &mut out);
@@ -569,6 +578,7 @@ fn key(s: &mut State, k: Key, out: &mut Vec<Command>) {
         Key::Char('n') => note(s),
         Key::Char('a') => ask(s, out),
         Key::Char('o') => open(s, out),
+        Key::Char('c') => copy(s, out),
         Key::Char('r') => out.push(Command::Reload),
         Key::Char('?') => s.help = true,
         Key::Char('S') => out.push(Command::LoadStats),
@@ -719,6 +729,28 @@ fn open(s: &mut State, out: &mut Vec<Command>) {
     } else {
         out.push(Command::OpenUrl(d.mr.clone()));
     }
+}
+
+/// `c`: the card's first command, then the next one on each press, around again.
+fn copy(s: &mut State, out: &mut Vec<Command>) {
+    let Some(d) = s.current() else { return };
+    let options: Vec<&str> = d.options.iter().map(|o| o.text.as_str()).collect();
+    let found = commands(&d.context, &options);
+    let id = d.id.clone();
+    if found.is_empty() {
+        return s.toast(format!("no command on {id}"));
+    }
+    let i = match &s.copy_at {
+        Some((at, i)) if *at == id => (i + 1) % found.len(),
+        _ => 0,
+    };
+    let mut head: String = found[i].replace('\n', "⏎").chars().take(40).collect();
+    if found[i].chars().count() > 40 {
+        head.push('…');
+    }
+    s.copy_at = Some((id, i));
+    s.toast(format!("copied {}/{}: {head}", i + 1, found.len()));
+    out.push(Command::Copy(found[i].clone()));
 }
 
 /// A keyboard quit sends what is pending and waits for every `decide` call to land, so a
@@ -1604,6 +1636,78 @@ mod tests {
         assert_eq!(s.toast.as_ref().unwrap().0, "no MR on D-2");
         update(&mut s, Event::Tick, T0 + TOAST_MS);
         assert_eq!(s.toast, None);
+    }
+
+    fn two_commands() -> Vec<Decision> {
+        let mut list = fixture();
+        list[0].context = "Run:\n```\nkubectl get pods\n```\nthen `git push origin main`".into();
+        list
+    }
+
+    #[test]
+    fn c_copies_the_command_and_cycles() {
+        let mut s = loaded(two_commands());
+        assert_eq!(
+            press(&mut s, Key::Char('c')),
+            [Command::Copy("kubectl get pods".into())]
+        );
+        assert_eq!(s.toast.as_ref().unwrap().0, "copied 1/2: kubectl get pods");
+        assert_eq!(
+            press(&mut s, Key::Char('c')),
+            [Command::Copy("git push origin main".into())]
+        );
+        assert_eq!(
+            s.toast.as_ref().unwrap().0,
+            "copied 2/2: git push origin main"
+        );
+        assert_eq!(
+            press(&mut s, Key::Char('c')),
+            [Command::Copy("kubectl get pods".into())]
+        );
+    }
+
+    #[test]
+    fn c_restarts_on_another_card() {
+        let mut list = two_commands();
+        list[1].context = "```\nmake test\n```".into();
+        let mut s = loaded(list);
+        press(&mut s, Key::Char('c'));
+        press(&mut s, Key::Char('J'));
+        assert_eq!(
+            press(&mut s, Key::Char('c')),
+            [Command::Copy("make test".into())]
+        );
+        assert_eq!(s.toast.as_ref().unwrap().0, "copied 1/1: make test");
+    }
+
+    #[test]
+    fn c_without_a_command_says_so() {
+        let mut s = loaded(fixture());
+        press(&mut s, Key::Char('J'));
+        assert!(press(&mut s, Key::Char('c')).is_empty());
+        assert_eq!(s.toast.as_ref().unwrap().0, "no command on D-2");
+    }
+
+    #[test]
+    fn a_long_command_is_cut_in_the_toast_only() {
+        let mut list = fixture();
+        let cmd = format!("echo {}\nls", "x".repeat(60));
+        list[0].context = format!("```\n{cmd}\n```");
+        let mut s = loaded(list);
+        assert_eq!(press(&mut s, Key::Char('c')), [Command::Copy(cmd)]);
+        let toast = &s.toast.as_ref().unwrap().0;
+        assert!(toast.starts_with("copied 1/1: echo xxx"), "{toast}");
+        assert!(
+            toast.chars().count() <= "copied 1/1: ".len() + 41,
+            "{toast}"
+        );
+    }
+
+    #[test]
+    fn a_failed_copy_is_a_toast() {
+        let mut s = loaded(fixture());
+        update(&mut s, Event::Copied(Err("no clipboard".into())), T0);
+        assert_eq!(s.toast.as_ref().unwrap().0, "copy failed: no clipboard");
     }
 
     #[test]

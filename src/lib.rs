@@ -2,6 +2,7 @@ pub mod activity;
 pub mod agents;
 pub mod app;
 pub mod cli;
+pub mod clipboard;
 pub mod colors;
 pub mod commands;
 pub mod config;

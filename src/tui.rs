@@ -100,6 +100,12 @@ impl Runner {
                     .stderr(Stdio::null())
                     .spawn();
             }
+            Command::Copy(text) => {
+                let tx = self.tx.clone();
+                thread::spawn(move || {
+                    let _ = tx.send(Event::Copied(crate::clipboard::copy(&text)));
+                });
+            }
             Command::Quit => return true,
         }
         false

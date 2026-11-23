@@ -179,6 +179,7 @@ and pi's subagent state are read from.
 | `a` | ask the agent a question back; on an answer card (`✉`), message its session, as `Tab` does |
 | `s` | skip to the end of the stack |
 | `o` | open the link (MR, PR, ticket) |
+| `c` | copy the card's command to the clipboard; again for the next one (fenced blocks, then inline code with a space) |
 | `r` | reload |
 | `S` | stats screen: answered and withdrawn per day, median time to answer, summary (esc or `S` returns) |
 | `w` | activity screen: what every session is doing (esc, `w` or `q` returns) |

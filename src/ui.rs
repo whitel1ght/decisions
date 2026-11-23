@@ -58,6 +58,7 @@ const KEYS: &[(&str, &str)] = &[
     ("⇧tab", "keys to the prompt line or back to the cards"),
     ("s", "skip to the end of the stack"),
     ("o", "open the link (MR, PR, ticket)"),
+    ("c", "copy the card's command (again: the next one)"),
     ("r", "reload"),
     ("S", "stats: the last 14 days"),
     ("w", "activity: what every session is doing"),

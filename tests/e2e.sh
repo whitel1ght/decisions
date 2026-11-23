@@ -109,6 +109,16 @@ wait "$client"
 assert_contains "$(cat "$SANDBOX/mcp.out")" "answered: 1 — Ship it" "an MCP ask_user answered in the deck returns that answer"
 assert_contains "$("$BIN" list --json; cat "$DECISIONS_DIR"/D-1.md)" "source: \"e2e-client · " "the card knows which client asked"
 
+fresh copy empty
+mkdir -p "$SANDBOX/clip"
+printf '#!/bin/sh\ncat > "%s/clip/copied"\n' "$SANDBOX" > "$SANDBOX/clip/pbcopy"
+chmod +x "$SANDBOX/clip/pbcopy"
+long="kubectl --context prod01 -n ecfx exec deploy/ecfx-admin -- python3 -c 'print(42)' --long-tail-argument"
+printf 'Run this:\n```\n%s\n```\n' "$long" |
+  "$BIN" add --question "Run it?" --option "You run it" --option "The agent skips it" >/dev/null
+PATH="$SANDBOX/clip:$PATH" drive c sleep:2 q >/dev/null
+assert_eq "$long" "$(cat "$SANDBOX/clip/copied" 2>/dev/null)" "c copies the card's whole command to the clipboard"
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
