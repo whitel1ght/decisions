@@ -49,14 +49,14 @@ fn tools() -> Value {
     json!([
         {
             "name": "ask_user",
-            "description": "Ask the user a question and wait for the answer in their decisions app, a queue of questions from all their agent sessions. Use it instead of asking in the chat for any decision, approval or clarification. Give 2-8 short options; the user can always answer in their own words, so do not add an \"Other\" option. The user reads the options, so each one names who acts: \"you\" is the user and \"the agent\" is you (\"The agent runs it through the admin pod\", \"You run it yourself\"); never write I, me, my or we in an option, since it is unclear which side they mean (the server refuses them). Put what the user needs to decide in `context` (markdown). Returns the answer, or `pending` with an id when the user has not answered yet: keep working on what does not depend on it and call wait_for_answer when you need it.",
+            "description": "Ask the user a question and wait for the answer in their decisions app, a queue of questions from all their agent sessions. Use it instead of asking in the chat for any decision, approval or clarification. Give 2-8 short options; the user can always answer in their own words, so do not add an \"Other\" option. The user reads the options, so each one names who acts: \"you\" is the user and \"the agent\" is you (\"The agent runs it through the admin pod\", \"You run it yourself\"); never write I, me, my or we in an option, since it is unclear which side they mean (the server refuses them). Put what the user needs to decide in `context` (markdown); a command the user should run goes there in its own fenced code block, never only inside an option or a sentence, so the deck shows it whole and copies it with c. Returns the answer, or `pending` with an id when the user has not answered yet: keep working on what does not depend on it and call wait_for_answer when you need it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "question": {"type": "string", "description": "One short question."},
                     "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 8, "description": "2-8 short answers to pick from, each naming who acts: \"you\" (the user) or \"the agent\"; no I, me, my or we."},
                     "recommended": {"type": "integer", "minimum": 1, "description": "1-based number of the option you recommend."},
-                    "context": {"type": "string", "description": "Markdown: what the user needs to know to decide."},
+                    "context": {"type": "string", "description": "Markdown: what the user needs to know to decide. A command for the user to run goes in its own fenced code block."},
                     "link": {"type": "string", "description": "A URL the user may open (e.g. the merge request)."},
                     "ticket": {"type": "string", "description": "Ticket key, e.g. ABC-123."},
                     "blocks": {"type": "string", "description": "What waits on the answer, in a word or two (e.g. merge, reply)."}
@@ -669,6 +669,20 @@ mod tests {
             r["result"]["tools"][0]["inputSchema"]["required"],
             json!(["question", "options"])
         );
+    }
+
+    #[test]
+    fn ask_user_asks_for_commands_in_fenced_blocks() {
+        let ask = &tools()[0];
+        for text in [
+            &ask["description"],
+            &ask["inputSchema"]["properties"]["context"]["description"],
+        ] {
+            assert!(
+                text.as_str().unwrap().contains("own fenced code block"),
+                "{text}"
+            );
+        }
     }
 
     #[test]
